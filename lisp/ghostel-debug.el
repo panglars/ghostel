@@ -37,6 +37,14 @@
 (declare-function ghostel--mode-enabled "ghostel-module")
 (declare-function ghostel--module-version "ghostel-module")
 
+;; Forward declarations for TRAMP symbols read by `ghostel-debug-info'
+;; that don't exist on every supported Emacs.  The actual reads are
+;; guarded with `boundp'/`fboundp' at runtime; these `defvar's just
+;; quiet the byte-compiler on Emacs 28/29 where TRAMP doesn't ship
+;; them.  Bare `defvar' without a value is a forward declaration only
+;; — it doesn't override TRAMP's real definition when present.
+(defvar tramp-direct-async-process)
+
 (defvar ghostel-debug--log-buffer nil
   "Buffer used for ghostel debug logging.")
 
