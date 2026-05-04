@@ -2524,7 +2524,16 @@ first real focus event."
   "Test hyperlink keymap and helpers."
   (should (keymapp ghostel-link-map))                      ; ghostel-link-map is a keymap
   (should (lookup-key ghostel-link-map [mouse-1]))         ; mouse-1 bound in link map
-  (should (lookup-key ghostel-link-map (kbd "RET")))       ; RET bound in link map
+  (should (lookup-key ghostel-link-map [mouse-2]))         ; mouse-2 bound in link map
+  ;; RET is intentionally NOT bound in the text-property link map: a
+  ;; binding there outranks the local map and hijacks RET away from the
+  ;; PTY when a typed substring is misdetected as a link.  The
+  ;; RET-follows-link affordance lives in `ghostel-copy-mode-map' only.
+  (should (null (lookup-key ghostel-link-map (kbd "RET"))))
+  (should (eq #'ghostel-open-link-at-point
+              (lookup-key ghostel-copy-mode-map (kbd "RET"))))
+  (should (eq #'ghostel-open-link-at-point
+              (lookup-key ghostel-copy-mode-map (kbd "<return>"))))
   (should (commandp #'ghostel-open-link-at-point))         ; open-link-at-point is interactive
   (should (null (ghostel--open-link nil)))                 ; open-link returns nil for empty
   (should (null (ghostel--open-link 42))))                 ; open-link returns nil for non-string

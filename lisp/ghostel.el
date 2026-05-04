@@ -1837,6 +1837,8 @@ Return non-nil if the event was forwarded (mouse tracking is active)."
     ;; Hyperlink navigation works in copy mode too
     (define-key map (kbd "C-c C-n") #'ghostel-next-hyperlink)
     (define-key map (kbd "C-c C-p") #'ghostel-previous-hyperlink)
+    (define-key map (kbd "RET")      #'ghostel-open-link-at-point)
+    (define-key map (kbd "<return>") #'ghostel-open-link-at-point)
     ;; Prompt navigation works in copy mode too
     (define-key map (kbd "C-c M-n") #'ghostel-next-prompt)
     (define-key map (kbd "C-c M-p") #'ghostel-previous-prompt)
@@ -1974,9 +1976,9 @@ stripped so the copied text matches the original terminal content."
   (let ((map (make-sparse-keymap)))
     (define-key map [mouse-1] #'ghostel-open-link-at-click)
     (define-key map [mouse-2] #'ghostel-open-link-at-click)
-    (define-key map (kbd "RET") #'ghostel-open-link-at-point)
     map)
-  "Keymap for clickable hyperlinks in ghostel buffers.")
+  "Keymap for clickable hyperlinks in ghostel buffers.
+Mouse clicks on a linkified cell open the link in any input mode.")
 
 (defun ghostel--native-link-help-echo (window _ pos)
   "Return the native OSC8 URI for the link at POS in WINDOW.
