@@ -4077,7 +4077,8 @@ be what `--start' receives."
           (setq ghostel-compile--command "make"
                 ghostel-compile--directory "/some/project/")
           (cl-letf (((symbol-function 'ghostel-compile--start)
-                     (lambda (_cmd _name dir) (setq dir-at-call dir))))
+                     (lambda (_cmd _name dir &optional _fm _i)
+                       (setq dir-at-call dir))))
             ;; Recompile from a buffer whose default-directory is somewhere else.
             (let ((default-directory "/elsewhere/"))
               (ghostel-recompile))
@@ -4101,7 +4102,8 @@ displaced by a new one."
           (setq ghostel-compile--command "make"
                 ghostel-compile--directory "/proj/")
           (cl-letf (((symbol-function 'ghostel-compile--start)
-                     (lambda (_cmd name _dir) (setq name-at-call name))))
+                     (lambda (_cmd name _dir &optional _fm _i)
+                       (setq name-at-call name))))
             (ghostel-recompile))
           ;; Buffer-name of the CURRENT buffer, not `ghostel-compile-buffer-name'.
           (should (equal "*some-specific-name*" name-at-call)))
@@ -4121,7 +4123,8 @@ edited version, matching the behaviour of \\[recompile]."
           (let ((cmd-at-call nil)
                 (prompt-default nil))
             (cl-letf (((symbol-function 'ghostel-compile--start)
-                       (lambda (cmd _name _dir) (setq cmd-at-call cmd)))
+                       (lambda (cmd _name _dir &optional _fm _i)
+                         (setq cmd-at-call cmd)))
                       ((symbol-function 'read-shell-command)
                        (lambda (_prompt default &rest _)
                          (setq prompt-default default)
@@ -4133,7 +4136,8 @@ edited version, matching the behaviour of \\[recompile]."
             ;; Without the prefix: no prompt, runs the last cmd verbatim.
             (setq cmd-at-call nil prompt-default nil)
             (cl-letf (((symbol-function 'ghostel-compile--start)
-                       (lambda (cmd _name _dir) (setq cmd-at-call cmd)))
+                       (lambda (cmd _name _dir &optional _fm _i)
+                         (setq cmd-at-call cmd)))
                       ((symbol-function 'read-shell-command)
                        (lambda (&rest _) (setq prompt-default t) "never")))
               (ghostel-recompile)
@@ -4297,18 +4301,23 @@ Specifically, it must not change the selected window or mutate its
     (should-not ghostel-called)))                              ; ours did not
 
 (ert-deftest ghostel-test-compile-global-mode-routes-to-ghostel-start ()
-  "For supported modes, the advice routes COMMAND through `ghostel-compile--start'."
+  "For supported modes, the advice routes COMMAND through `ghostel-compile--start'.
+The default route — MODE nil or `compilation-mode' — must use the
+read-only variant (interactive=nil)."
   (let ((captured nil))
     (cl-letf (((symbol-function 'ghostel-compile--start)
-               (lambda (cmd name dir &optional _finished-mode)
-                 (setq captured (list cmd name dir))
+               (lambda (cmd name dir &optional _finished-mode interactive
+                            &rest _)
+                 (setq captured (list cmd name dir interactive))
                  (generate-new-buffer " *ghostel-test-advice*"))))
       (ghostel-compile--compilation-start-advice
        (lambda (&rest _) (error "Stock path should not run"))
        "make test" nil nil nil nil))
     (should (equal "make test" (nth 0 captured)))              ; command preserved
     ;; Default buffer name for `compilation-mode' is "*compilation*".
-    (should (string-match-p "compilation" (nth 1 captured)))))
+    (should (string-match-p "compilation" (nth 1 captured)))
+    ;; Read-only by default — no prefix, no MODE=t.
+    (should-not (nth 3 captured))))
 
 (ert-deftest ghostel-test-compile-global-mode-threads-subclass-mode ()
   "A custom compile-mode subclass passed as MODE is forwarded to finalize.
@@ -4318,22 +4327,28 @@ The advice must pass a non-`compilation-mode' MODE through to
 subclass (with its error-regexp, font-lock keywords, etc.) is the
 major mode the buffer ends up in after finalize — and *not*
 override with the default `ghostel-compile-view-mode'."
-  (let ((captured-finished nil))
+  (let ((captured-finished nil)
+        (captured-interactive 'unset))
     (cl-letf (((symbol-function 'ghostel-compile--start)
-               (lambda (_cmd _name _dir &optional finished-mode)
-                 (setq captured-finished finished-mode)
+               (lambda (_cmd _name _dir &optional finished-mode interactive
+                             &rest _)
+                 (setq captured-finished finished-mode
+                       captured-interactive interactive)
                  nil)))
-      ;; Custom mode → threaded through.
+      ;; Custom mode → threaded through; still read-only (interactive=nil).
       (ghostel-compile--compilation-start-advice
        (lambda (&rest _) (error "Stock path should not run"))
        "make" 'my-custom-compile-mode nil nil nil)
       (should (eq 'my-custom-compile-mode captured-finished))
+      (should-not captured-interactive)
       ;; Plain `compilation-mode' → nil (default view-mode kicks in).
-      (setq captured-finished :unchanged)
+      (setq captured-finished :unchanged
+            captured-interactive 'unset)
       (ghostel-compile--compilation-start-advice
        (lambda (&rest _) (error "Stock path should not run"))
        "make" 'compilation-mode nil nil nil)
-      (should-not captured-finished))))
+      (should-not captured-finished)
+      (should-not captured-interactive))))
 
 (ert-deftest ghostel-test-compile-global-mode-falls-through-on-continue ()
   "Non-nil CONTINUE must fall through: `--start' recreates the buffer."
@@ -4347,15 +4362,26 @@ override with the default `ghostel-compile-view-mode'."
     (should orig-called)
     (should-not ghostel-called)))
 
-(ert-deftest ghostel-test-compile-global-mode-falls-through-on-comint ()
-  "MODE=t (comint) must fall through."
-  (let ((orig-called nil))
+(ert-deftest ghostel-test-compile-global-mode-routes-mode-t-to-interactive ()
+  "MODE=t routes to a writable ghostel terminal, not stock comint.
+This is the user-facing target for `\\[universal-argument] \\[compile]':
+the caller is asking for an interactive buffer, and we honour that
+by spawning a ghostel terminal (so a real TTY is still available)
+instead of falling through to `comint-mode'."
+  (let ((captured-interactive 'unset)
+        (captured-name nil))
     (cl-letf (((symbol-function 'ghostel-compile--start)
-               (lambda (&rest _) (error "Should not run"))))
+               (lambda (_cmd name _dir &optional _fm interactive &rest _)
+                 (setq captured-interactive interactive
+                       captured-name name)
+                 (generate-new-buffer " *ghostel-test-mode-t*"))))
       (ghostel-compile--compilation-start-advice
-       (lambda (&rest _) (setq orig-called t) nil)
+       (lambda (&rest _) (error "Stock comint path should not run"))
        "make" t nil nil nil))
-    (should orig-called)))
+    (should (eq t captured-interactive))                         ; interactive variant
+    ;; Stock `compilation-start' uses "compilation" as name-of-mode for MODE=t;
+    ;; we mirror that for buffer-name parity.
+    (should (string-match-p "compilation" captured-name))))
 
 (ert-deftest ghostel-test-compile-global-mode-excluded-custom-mode ()
   "A custom mode added to `ghostel-compile-global-mode-excluded-modes' falls through."
@@ -4368,18 +4394,465 @@ override with the default `ghostel-compile-view-mode'."
        "whatever" 'my-fake-grep-mode nil nil nil))
     (should orig-called)))
 
+(ert-deftest ghostel-test-compile-interactive-form-no-prefix ()
+  "`M-x ghostel-compile' with no prefix arg → INTERACTIVE=nil (read-only run)."
+  (let ((captured-interactive 'unset)
+        (compile-command "make")
+        (compilation-read-command nil)
+        (current-prefix-arg nil))
+    (cl-letf (((symbol-function 'ghostel-compile--start)
+               (lambda (_cmd _name _dir &optional _fm interactive)
+                 (setq captured-interactive interactive)))
+              ((symbol-function 'save-some-buffers) (lambda (&rest _) nil)))
+      (call-interactively #'ghostel-compile)
+      (should-not captured-interactive))))
+
+(ert-deftest ghostel-test-compile-interactive-form-c-u ()
+  "\\[universal-argument] \\[ghostel-compile] → INTERACTIVE=t (writable terminal)."
+  (let ((captured-interactive 'unset)
+        (compile-command "make")
+        (current-prefix-arg '(4)))                               ; C-u
+    (cl-letf (((symbol-function 'ghostel-compile--start)
+               (lambda (_cmd _name _dir &optional _fm interactive)
+                 (setq captured-interactive interactive)))
+              ((symbol-function 'read-shell-command)
+               (lambda (_p default &rest _) default))           ; auto-accept
+              ((symbol-function 'save-some-buffers) (lambda (&rest _) nil)))
+      (call-interactively #'ghostel-compile)
+      (should (eq t captured-interactive)))))
+
+(ert-deftest ghostel-test-compile-interactive-form-numeric-prefix ()
+  "Numeric prefix prompts but does NOT switch to interactive mode.
+Mirrors stock \\[compile] where the `consp' check on
+`current-prefix-arg' is the gate for the interactive (comint)
+variant — a numeric prefix like `C-3' is `consp'-false."
+  (let ((captured-interactive 'unset)
+        (prompted nil)
+        (compile-command "make")
+        (current-prefix-arg 3))                                   ; numeric prefix
+    (cl-letf (((symbol-function 'ghostel-compile--start)
+               (lambda (_cmd _name _dir &optional _fm interactive)
+                 (setq captured-interactive interactive)))
+              ((symbol-function 'read-shell-command)
+               (lambda (_p default &rest _) (setq prompted t) default))
+              ((symbol-function 'save-some-buffers) (lambda (&rest _) nil)))
+      (call-interactively #'ghostel-compile)
+      (should prompted)                                           ; prompt happened
+      (should-not captured-interactive))))                        ; still read-only
+
+(ert-deftest ghostel-test-compile-recompile-preserves-interactive-mode ()
+  "`ghostel-recompile' must reuse the launch mode of the source buffer.
+A buffer launched with INTERACTIVE=t reruns interactively; one
+launched read-only reruns read-only."
+  (let ((captured-interactive 'unset)
+        (inhibit-message t))
+    (cl-letf (((symbol-function 'ghostel-compile--start)
+               (lambda (_cmd _name _dir &optional _fm interactive)
+                 (setq captured-interactive interactive))))
+      ;; Source buffer launched interactively.
+      (let ((buf (generate-new-buffer " *ghostel-test-recompile-int*")))
+        (unwind-protect
+            (with-current-buffer buf
+              (ghostel-mode)
+              (setq ghostel-compile--command "make"
+                    ghostel-compile--directory "/tmp/"
+                    ghostel-compile--interactive t)
+              (ghostel-recompile)
+              (should (eq t captured-interactive)))
+          (kill-buffer buf)))
+      ;; Source buffer launched read-only.
+      (setq captured-interactive 'unset)
+      (let ((buf (generate-new-buffer " *ghostel-test-recompile-ro*")))
+        (unwind-protect
+            (with-current-buffer buf
+              (ghostel-mode)
+              (setq ghostel-compile--command "make"
+                    ghostel-compile--directory "/tmp/"
+                    ghostel-compile--interactive nil)
+              (ghostel-recompile)
+              (should-not captured-interactive))
+          (kill-buffer buf))))))
+
+(ert-deftest ghostel-test-compile-readonly-buffer-during-run ()
+  "Default (read-only) run: buffer is locked, compile keys are bound.
+
+The buffer is in `ghostel-mode' (so the renderer keeps working) but
+`buffer-read-only' is set and the local map is the compile-style
+`ghostel-compile-view-mode-map' — `g' reruns, `n'/`p' walk errors,
+attempts to mutate the buffer signal `buffer-read-only'."
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((buf-name "*ghostel-test-readonly-compile*")
+         (inhibit-message t)
+         (save-some-buffers-default-predicate (lambda () nil))
+         (ghostel-compile-finished-major-mode nil))
+    (when (get-buffer buf-name)
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer buf-name)))
+    (unwind-protect
+        ;; INTERACTIVE arg omitted → defaults to nil (read-only).
+        (let ((buf (ghostel-compile--start "sleep 30" buf-name
+                                           default-directory)))
+          (with-current-buffer buf
+            (ghostel-test--wait-for
+             ghostel--process
+             (lambda () (eq 'run (process-status ghostel--process))))
+            ;; Major mode is still ghostel-mode (renderer prerequisite).
+            (should (eq major-mode 'ghostel-mode))
+            ;; Buffer is read-only.
+            (should buffer-read-only)
+            ;; Local map is the compile-style one.
+            (should (eq (current-local-map) ghostel-compile-view-mode-map))
+            ;; `g' is bound to ghostel-recompile (not to ghostel's
+            ;; self-insert), `n'/`p' walk errors.
+            (should (eq (key-binding "g") #'ghostel-recompile))
+            (should (eq (key-binding "n") #'compilation-next-error))
+            (should (eq (key-binding "p") #'compilation-previous-error))
+            ;; Plain letters do NOT route to the process — `a' is not
+            ;; bound to ghostel's self-insert in the compile keymap,
+            ;; so a keystroke wouldn't make it to the PTY.
+            (should-not (eq (key-binding "a") #'ghostel--self-insert))
+            ;; A mutation attempt is rejected with `buffer-read-only'.
+            (should-error (barf-if-buffer-read-only)
+                          :type 'buffer-read-only)
+            ;; Kill the sleep process so the test doesn't leak.
+            (let ((p ghostel--process))
+              (when (process-live-p p)
+                (set-process-sentinel p #'ignore)
+                (set-process-filter p #'ignore)
+                (setq compilation-in-progress
+                      (delq p compilation-in-progress))
+                (delete-process p)))))
+      (when (get-buffer buf-name)
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer buf-name))))))
+
+(ert-deftest ghostel-test-compile-finalize-preserves-interactive-mode ()
+  "Finalize must carry `ghostel-compile--interactive' across the mode switch.
+The variable is buffer-local and `funcall target-mode' wipes
+locals, so finalize has to save and restore it — otherwise
+`ghostel-recompile' from the finished buffer would lose the launch
+mode."
+  (ghostel-test--with-compile-buffer buf
+    (setq ghostel-compile--command "make"
+          ghostel-compile--start-time (current-time)
+          ghostel-compile--scan-marker (copy-marker (point-max))
+          ghostel-compile--directory "/tmp/"
+          ghostel-compile--interactive t)
+    (ghostel-compile--finalize buf 0 (current-time))
+    (should (eq t ghostel-compile--interactive)))
+  (ghostel-test--with-compile-buffer buf
+    (setq ghostel-compile--command "make"
+          ghostel-compile--start-time (current-time)
+          ghostel-compile--scan-marker (copy-marker (point-max))
+          ghostel-compile--directory "/tmp/"
+          ghostel-compile--interactive nil)
+    (ghostel-compile--finalize buf 0 (current-time))
+    (should-not ghostel-compile--interactive)))
+
+(ert-deftest ghostel-test-compile-recompile-after-finalize-preserves-mode ()
+  "End-to-end: finalize → `g' must recompile in the launched mode.
+The earlier per-step tests cover the variable across each
+transition; this one chains them — finalize the buffer (which
+performs `funcall target-mode' under the hood, the operation that
+wipes buffer-locals), then call `ghostel-recompile' and assert the
+INTERACTIVE arg `--start' receives matches the original launch."
+  (let ((captured-interactive 'unset)
+        (inhibit-message t))
+    ;; Finalized buffer originally launched read-only.
+    (ghostel-test--with-compile-buffer buf
+      (setq ghostel-compile--command "make"
+            ghostel-compile--start-time (current-time)
+            ghostel-compile--scan-marker (copy-marker (point-max))
+            ghostel-compile--directory "/tmp/"
+            ghostel-compile--interactive nil)
+      (ghostel-compile--finalize buf 0 (current-time))
+      ;; Buffer is now in `ghostel-compile-view-mode' — `funcall target-mode'
+      ;; just ran.  Press `g' from inside it.
+      (cl-letf (((symbol-function 'ghostel-compile--start)
+                 (lambda (_cmd _name _dir &optional _fm interactive &rest _)
+                   (setq captured-interactive interactive))))
+        (ghostel-recompile))
+      (should-not captured-interactive))
+    ;; And originally launched interactively.
+    (setq captured-interactive 'unset)
+    (ghostel-test--with-compile-buffer buf
+      (setq ghostel-compile--command "htop"
+            ghostel-compile--start-time (current-time)
+            ghostel-compile--scan-marker (copy-marker (point-max))
+            ghostel-compile--directory "/tmp/"
+            ghostel-compile--interactive t)
+      (ghostel-compile--finalize buf 0 (current-time))
+      (cl-letf (((symbol-function 'ghostel-compile--start)
+                 (lambda (_cmd _name _dir &optional _fm interactive &rest _)
+                   (setq captured-interactive interactive))))
+        (ghostel-recompile))
+      (should (eq t captured-interactive)))))
+
+(ert-deftest ghostel-test-compile-sets-compilation-arguments ()
+  "`--start' must populate `compilation-arguments' for `revert-buffer'.
+Direct callers (no tuple passed) get the launch mode in the MODE
+slot so a revert routes through the global-mode advice and lands
+on the same variant.  The advice passes its own tuple verbatim, so
+custom MODE / NAME-FUNCTION / HIGHLIGHT-REGEXP survive a revert."
+  ;; Direct call without a tuple → synthesized default.
+  (let ((buf-name "*ghostel-test-compargs-direct*")
+        (inhibit-message t)
+        (save-some-buffers-default-predicate (lambda () nil))
+        (ghostel-compile-finished-major-mode nil))
+    (when (get-buffer buf-name)
+      (let ((kill-buffer-query-functions nil)) (kill-buffer buf-name)))
+    (cl-letf (((symbol-function 'ghostel--load-module) #'ignore)
+              ((symbol-function 'ghostel--new) (lambda (&rest _) 'fake))
+              ((symbol-function 'ghostel--apply-palette) #'ignore)
+              ((symbol-function 'ghostel--set-size) #'ignore)
+              ((symbol-function 'ghostel--cursor-position)
+               (lambda (_) (cons 0 0)))
+              ((symbol-function 'ghostel-compile--render-header-live)
+               #'ignore)
+              ((symbol-function 'ghostel-compile--spawn)
+               (lambda (_cmd buf _h _w)
+                 (let ((p (start-process "ghostel-test-args" buf
+                                         "sleep" "100")))
+                   (set-process-sentinel p #'ignore)
+                   (set-process-query-on-exit-flag p nil)
+                   (with-current-buffer buf (setq ghostel--process p))
+                   p))))
+      (unwind-protect
+          (let ((buf (ghostel-compile--start "make" buf-name "/tmp/" nil nil)))
+            (with-current-buffer buf
+              ;; Default tuple records nil in MODE (read-only run).
+              (should (equal '("make" nil nil nil) compilation-arguments))
+              (should (eq #'compilation-revert-buffer revert-buffer-function))
+              (let ((p ghostel--process))
+                (when (process-live-p p)
+                  (setq compilation-in-progress
+                        (delq p compilation-in-progress))
+                  (delete-process p)))))
+        (when (get-buffer buf-name)
+          (let ((kill-buffer-query-functions nil)) (kill-buffer buf-name))))))
+  ;; Caller-supplied tuple wins.
+  (let ((buf-name "*ghostel-test-compargs-tuple*")
+        (inhibit-message t)
+        (save-some-buffers-default-predicate (lambda () nil))
+        (ghostel-compile-finished-major-mode nil))
+    (when (get-buffer buf-name)
+      (let ((kill-buffer-query-functions nil)) (kill-buffer buf-name)))
+    (cl-letf (((symbol-function 'ghostel--load-module) #'ignore)
+              ((symbol-function 'ghostel--new) (lambda (&rest _) 'fake))
+              ((symbol-function 'ghostel--apply-palette) #'ignore)
+              ((symbol-function 'ghostel--set-size) #'ignore)
+              ((symbol-function 'ghostel--cursor-position)
+               (lambda (_) (cons 0 0)))
+              ((symbol-function 'ghostel-compile--render-header-live)
+               #'ignore)
+              ((symbol-function 'ghostel-compile--spawn)
+               (lambda (_cmd buf _h _w)
+                 (let ((p (start-process "ghostel-test-args2" buf
+                                         "sleep" "100")))
+                   (set-process-sentinel p #'ignore)
+                   (set-process-query-on-exit-flag p nil)
+                   (with-current-buffer buf (setq ghostel--process p))
+                   p))))
+      (unwind-protect
+          (let* ((tuple '("make" my-mode my-namer "rgxp"))
+                 (buf (ghostel-compile--start "make" buf-name "/tmp/"
+                                              nil nil tuple)))
+            (with-current-buffer buf
+              (should (equal tuple compilation-arguments))
+              (let ((p ghostel--process))
+                (when (process-live-p p)
+                  (setq compilation-in-progress
+                        (delq p compilation-in-progress))
+                  (delete-process p)))))
+        (when (get-buffer buf-name)
+          (let ((kill-buffer-query-functions nil)) (kill-buffer buf-name)))))))
+
+(ert-deftest ghostel-test-compile-toggle-mode-keymap-bindings ()
+  "`ghostel-compile-toggle-mode-map' binds the switch commands.
+`switch-to-readonly' has two bindings — the second mirrors
+`ghostel-mode's copy-mode key, since both are navigable/frozen
+states."
+  (should (eq #'ghostel-compile-switch-to-interactive
+              (lookup-key ghostel-compile-toggle-mode-map (kbd "C-c C-j"))))
+  (should (eq #'ghostel-compile-switch-to-readonly
+              (lookup-key ghostel-compile-toggle-mode-map (kbd "C-c C-e"))))
+  (should (eq #'ghostel-compile-switch-to-readonly
+              (lookup-key ghostel-compile-toggle-mode-map (kbd "C-c C-t")))))
+
+(ert-deftest ghostel-test-compile-switch-errors-without-process ()
+  "Both switch commands error in a buffer without a live process.
+Post-finalize the keys remain bound but the commands refuse to act
+— the user is told to recompile with `g' instead."
+  (let ((buf (generate-new-buffer " *ghostel-test-switch-no-proc*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel-compile--command "make"
+                ghostel--process nil)
+          (should-error (ghostel-compile-switch-to-interactive)
+                        :type 'user-error)
+          (should-error (ghostel-compile-switch-to-readonly)
+                        :type 'user-error))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-compile-switch-errors-in-non-compile-buffer ()
+  "Both switch commands error in a `ghostel-mode' buffer with no compile state."
+  (let ((buf (generate-new-buffer " *ghostel-test-switch-non-compile*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          ;; No `ghostel-compile--command' — not a compile buffer.
+          (should-error (ghostel-compile-switch-to-interactive)
+                        :type 'user-error)
+          (should-error (ghostel-compile-switch-to-readonly)
+                        :type 'user-error))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-compile-mode-line-running-reflects-interactive ()
+  "`--set-mode-line-running' shows `:run' read-only / `:run/i' interactive."
+  (with-temp-buffer
+    (let ((ghostel-compile--interactive nil))
+      (ghostel-compile--set-mode-line-running)
+      (should (equal ":run" (cadr (car mode-line-process)))))
+    (let ((ghostel-compile--interactive t))
+      (ghostel-compile--set-mode-line-running)
+      (should (equal ":run/i" (cadr (car mode-line-process)))))))
+
+(ert-deftest ghostel-test-compile-switch-flips-state ()
+  "End-to-end: spawn a long sleep read-only, switch to interactive and back.
+
+After `\\[ghostel-compile-switch-to-interactive]' the buffer must
+become writable, the local map must drop the compile-style one for
+`ghostel-mode-map', and `mode-line-process' must show `:run/i'.
+After `\\[ghostel-compile-switch-to-readonly]' the buffer must lock
+back, install `ghostel-compile-view-mode-map', and the mode-line
+must read `:run' again."
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((buf-name "*ghostel-test-toggle-flip*")
+         (inhibit-message t)
+         (save-some-buffers-default-predicate (lambda () nil))
+         (ghostel-compile-finished-major-mode nil))
+    (when (get-buffer buf-name)
+      (let ((kill-buffer-query-functions nil)) (kill-buffer buf-name)))
+    (unwind-protect
+        ;; Default (read-only) launch.
+        (let ((buf (ghostel-compile--start "sleep 30" buf-name
+                                           default-directory)))
+          (with-current-buffer buf
+            (ghostel-test--wait-for
+             ghostel--process
+             (lambda () (eq 'run (process-status ghostel--process))))
+            ;; Initial state: read-only.
+            (should (eq (current-local-map) ghostel-compile-view-mode-map))
+            (should buffer-read-only)
+            (should-not ghostel-compile--interactive)
+            (should (equal ":run" (cadr (car mode-line-process))))
+            ;; Switch to interactive.
+            (ghostel-compile-switch-to-interactive)
+            (should ghostel-compile--interactive)
+            (should-not buffer-read-only)
+            (should (eq (current-local-map) ghostel-mode-map))
+            (should (equal ":run/i" (cadr (car mode-line-process))))
+            ;; No-op when already interactive.
+            (ghostel-compile-switch-to-interactive)
+            (should ghostel-compile--interactive)        ; unchanged
+            ;; Switch back to read-only.
+            (ghostel-compile-switch-to-readonly)
+            (should-not ghostel-compile--interactive)
+            (should buffer-read-only)
+            (should (eq (current-local-map) ghostel-compile-view-mode-map))
+            (should (equal ":run" (cadr (car mode-line-process))))
+            ;; No-op when already read-only.
+            (ghostel-compile-switch-to-readonly)
+            (should-not ghostel-compile--interactive)    ; unchanged
+            ;; Cleanup.
+            (let ((p ghostel--process))
+              (when (process-live-p p)
+                (set-process-sentinel p #'ignore)
+                (set-process-filter p #'ignore)
+                (setq compilation-in-progress
+                      (delq p compilation-in-progress))
+                (delete-process p)))))
+      (when (get-buffer buf-name)
+        (let ((kill-buffer-query-functions nil)) (kill-buffer buf-name))))))
+
+(ert-deftest ghostel-test-compile-toggle-mode-active-during-run ()
+  "`ghostel-compile-toggle-mode' is auto-enabled in compile buffers.
+The minor-mode keymap takes precedence over the local map and the
+major-mode map, so `\\[ghostel-compile-switch-to-interactive]' /
+`\\[ghostel-compile-switch-to-readonly]' work in both run states."
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((buf-name "*ghostel-test-toggle-mode-active*")
+         (inhibit-message t)
+         (save-some-buffers-default-predicate (lambda () nil))
+         (ghostel-compile-finished-major-mode nil))
+    (when (get-buffer buf-name)
+      (let ((kill-buffer-query-functions nil)) (kill-buffer buf-name)))
+    (unwind-protect
+        (let ((buf (ghostel-compile--start "sleep 30" buf-name
+                                           default-directory)))
+          (with-current-buffer buf
+            (ghostel-test--wait-for
+             ghostel--process
+             (lambda () (eq 'run (process-status ghostel--process))))
+            ;; Read-only state: minor-mode binding wins over view-mode-map.
+            (should ghostel-compile-toggle-mode)
+            (should (eq (key-binding (kbd "C-c C-j"))
+                        #'ghostel-compile-switch-to-interactive))
+            (should (eq (key-binding (kbd "C-c C-e"))
+                        #'ghostel-compile-switch-to-readonly))
+            ;; Switch and re-check: keys still bound (minor-mode wins
+            ;; over `ghostel-mode-map' too).
+            (ghostel-compile-switch-to-interactive)
+            (should ghostel-compile-toggle-mode)
+            (should (eq (key-binding (kbd "C-c C-j"))
+                        #'ghostel-compile-switch-to-interactive))
+            (should (eq (key-binding (kbd "C-c C-e"))
+                        #'ghostel-compile-switch-to-readonly))
+            ;; Cleanup.
+            (let ((p ghostel--process))
+              (when (process-live-p p)
+                (set-process-sentinel p #'ignore)
+                (set-process-filter p #'ignore)
+                (setq compilation-in-progress
+                      (delq p compilation-in-progress))
+                (delete-process p)))))
+      (when (get-buffer buf-name)
+        (let ((kill-buffer-query-functions nil)) (kill-buffer buf-name))))))
+
+(ert-deftest ghostel-test-compile-toggle-mode-active-post-finalize ()
+  "After finalize, the toggle mode survives into `ghostel-compile-view-mode'.
+The keys remain bound; the commands error gracefully because there
+is no live process."
+  (ghostel-test--with-compile-buffer buf
+    (setq ghostel-compile--command "make"
+          ghostel-compile--start-time (current-time)
+          ghostel-compile--scan-marker (copy-marker (point-max))
+          ghostel-compile--directory "/tmp/")
+    (ghostel-compile--finalize buf 0 (current-time))
+    ;; View-mode is now the major mode; the toggle minor mode must be on.
+    (should ghostel-compile-toggle-mode)
+    (should (eq (key-binding (kbd "C-c C-j"))
+                #'ghostel-compile-switch-to-interactive))
+    ;; And the command rejects the call because there's no process.
+    (should-error (ghostel-compile-switch-to-interactive)
+                  :type 'user-error)))
+
 (ert-deftest ghostel-test-compile-allows-interactive-input-during-run ()
-  "Regression: during a run the buffer must be interactive.
+  "Regression: when launched interactively, the buffer must accept input.
 
-`ghostel-compile--start' must not enable `compilation-minor-mode'
-on the live buffer — that minor mode's keymap shadows
-`ghostel-mode's self-insert, so letters like `q', `a', `g' would
-stop reaching the process (breaking `htop', `less', read prompts
-etc.).  And `--spawn' must set `ghostel--process' so
-`ghostel--self-insert' has a process to send keystrokes to.
+When `ghostel-compile--start' is called with INTERACTIVE non-nil
+\(via \\[universal-argument] \\[ghostel-compile], or
+`compilation-start' with MODE=t under `ghostel-compile-global-mode'),
+the live buffer must remain writable: `compilation-minor-mode' must
+not be enabled on it, and the local map must keep `ghostel-mode's
+self-insert so letters like `q', `a', `g' reach the process (this
+is what makes `htop', `less', read prompts etc. work).  And
+`--spawn' must set `ghostel--process' so `ghostel--self-insert' has
+a process to send keystrokes to.
 
-Run a long-lived `cat', verify both conditions, then send bytes
-through the process to confirm they land in the buffer."
+Run a long-lived `cat' interactively, verify both conditions, then
+send bytes through the process to confirm they land in the buffer."
   (skip-unless (file-executable-p "/bin/sh"))
   (let* ((buf-name "*ghostel-test-interactive-compile*")
          (inhibit-message t)
@@ -4389,7 +4862,8 @@ through the process to confirm they land in the buffer."
       (let ((kill-buffer-query-functions nil))
         (kill-buffer buf-name)))
     (unwind-protect
-        (let ((buf (ghostel-compile--start "cat" buf-name default-directory)))
+        (let ((buf (ghostel-compile--start "cat" buf-name
+                                           default-directory nil t))) ; interactive=t
           (with-current-buffer buf
             ;; Wait for the process to be alive.
             (ghostel-test--wait-for
@@ -4399,6 +4873,8 @@ through the process to confirm they land in the buffer."
             ;; minor mode stealing keys.
             (should (eq major-mode 'ghostel-mode))
             (should-not (bound-and-true-p compilation-minor-mode))
+            ;; Buffer is writable in interactive mode.
+            (should-not buffer-read-only)
             ;; Plain letters route through ghostel-mode's self-insert,
             ;; not through compilation-mode's navigation commands.
             (should (eq (key-binding "q") #'ghostel--self-insert))
@@ -9854,8 +10330,19 @@ slip past the unit tests."
     ghostel-test-compile-global-mode-routes-to-ghostel-start
     ghostel-test-compile-global-mode-threads-subclass-mode
     ghostel-test-compile-global-mode-falls-through-on-continue
-    ghostel-test-compile-global-mode-falls-through-on-comint
+    ghostel-test-compile-global-mode-routes-mode-t-to-interactive
     ghostel-test-compile-global-mode-excluded-custom-mode
+    ghostel-test-compile-interactive-form-no-prefix
+    ghostel-test-compile-interactive-form-c-u
+    ghostel-test-compile-interactive-form-numeric-prefix
+    ghostel-test-compile-recompile-preserves-interactive-mode
+    ghostel-test-compile-finalize-preserves-interactive-mode
+    ghostel-test-compile-recompile-after-finalize-preserves-mode
+    ghostel-test-compile-toggle-mode-keymap-bindings
+    ghostel-test-compile-switch-errors-without-process
+    ghostel-test-compile-switch-errors-in-non-compile-buffer
+    ghostel-test-compile-mode-line-running-reflects-interactive
+    ghostel-test-compile-toggle-mode-active-post-finalize
     ghostel-test-compile-reconciles-vt-size-to-outwin
     ghostel-test-compile-reconciles-skips-when-no-outwin
     ghostel-test-viewport-start-skips-trailing-newline

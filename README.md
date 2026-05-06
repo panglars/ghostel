@@ -826,11 +826,12 @@ tool gets confused by the unfamiliar `TERM`, set
 
 Commands:
 
-| Command                      | Description                                              |
-|------------------------------|----------------------------------------------------------|
-| `M-x ghostel-compile`        | Prompt for a command and run it (uses `compile-command`) |
-| `M-x ghostel-recompile`      | Re-run the last command in its original directory        |
-| `M-x ghostel-compile-global-mode` | Route *all* `compile`-style calls through ghostel (opt-in) |
+| Command                       | Description                                                                |
+|-------------------------------|----------------------------------------------------------------------------|
+| `M-x ghostel-compile`         | Run a command in a read-only ghostel buffer (uses `compile-command`)       |
+| `C-u M-x ghostel-compile`     | Prompt for the command and run it in an *interactive* (writable) buffer    |
+| `M-x ghostel-recompile`       | Re-run the last command in its original directory (preserves launch mode)  |
+| `M-x ghostel-compile-global-mode` | Route *all* `compile`-style calls through ghostel (opt-in)             |
 
 What a run looks like — the buffer text matches `M-x compile`:
 
@@ -845,6 +846,20 @@ make -j4 test
 Compilation finished at Wed Apr 15 08:30:19, duration 8.20 s
 ```
 
+By default the buffer is **read-only and navigable from the start** —
+just like a `M-x compile` buffer.  `g` reruns, `n`/`p` walk errors
+(parsed once the run finishes), `RET` jumps to the source.
+Keystrokes do *not* reach the running process, so the
+"compile-mode" UX (read coloured output, kill with `C-c C-c`) is
+available even mid-run.
+
+Pass a prefix arg (`C-u M-x ghostel-compile`, mirroring
+`C-u M-x compile`) to launch in **interactive** mode instead — the
+buffer stays writable for the duration of the run, so programs like
+`htop`, `less`, test runners that prompt for input, or anything that
+wants live keystrokes work.  `ghostel-recompile` (`g`) preserves
+whichever mode the buffer was launched in.
+
 When the command finishes, the live process and ghostel renderer are
 torn down and the buffer's major mode is switched to
 `ghostel-compile-view-mode` (derived from `compilation-mode`).  The
@@ -853,9 +868,38 @@ coloured error / line-number faces; the buffer never returns to an
 interactive ghostel terminal — a recompile discards it and starts
 fresh in the original directory.  `mode-line-process` shows
 `:run` while the command is running and `:exit [N]` afterwards, using
-the same faces `M-x compile` uses.
+the same faces `M-x compile` uses.  In an interactive run the marker
+reads `:run/i` instead of `:run` so you can see at a glance that the
+buffer accepts keystrokes.
 
-Keybindings (in `ghostel-compile-view-mode`):
+#### Live mode switching
+
+Sometimes a command turns out to need input — a `read -p`, a `git
+push` password prompt, a test runner asking `y/n`, or you'd like
+to attach to `htop` mid-run.  Two keys switch the buffer's state
+without restarting the process:
+
+| Key                   | Action                                          |
+|-----------------------|-------------------------------------------------|
+| `C-c C-j`             | Switch to interactive (writable terminal)       |
+| `C-c C-e` / `C-c C-t` | Switch back to read-only / compile-mode-style   |
+
+(`C-c C-t` mirrors `ghostel-mode`'s key for entering copy-mode —
+the read-only/navigable state in a regular ghostel terminal — so
+the same muscle memory works in compile buffers.)
+
+Both keys are bound by `ghostel-compile-toggle-mode`, a small
+buffer-local minor mode auto-enabled in compile buffers (so the
+keys don't show up in regular `M-x ghostel` terminals).  They work
+in either run state — the minor-mode keymap takes precedence, so
+your keystrokes are intercepted before they reach the PTY.
+
+Subsequent recompiles preserve whichever state you last switched
+to.  After the run finishes the keys remain bound; calling them
+on a finished buffer is a no-op with a "recompile with `g`
+instead" message.
+
+#### Keybindings (in `ghostel-compile-view-mode`, also active during a read-only run)
 
 | Key             | Action                                                  |
 |-----------------|---------------------------------------------------------|
@@ -864,6 +908,8 @@ Keybindings (in `ghostel-compile-view-mode`):
 | `RET` / `mouse-2` | Jump to the source of the error under point           |
 | `M-g n` / `M-g p` | Standard `next-error` / `previous-error`              |
 | `C-c C-c`       | `compile-goto-error` (same as RET)                      |
+| `C-c C-k`       | `kill-compilation` — interrupt the running process      |
+| `C-c C-j` / `C-c C-e` / `C-c C-t` | Switch to interactive / read-only (see above) |
 
 These standard `compile` options are honoured:
 
@@ -872,7 +918,10 @@ These standard `compile` options are honoured:
   written back, and the history list is `compile-history`, so recent
   commands round-trip between the two commands.
 - **`compilation-read-command`** — when nil, `ghostel-compile` runs
-  `compile-command` silently; pass a prefix arg to force the prompt.
+  `compile-command` silently; pass any prefix arg to force the
+  prompt.  The universal prefix (`C-u`) additionally switches the
+  buffer into interactive (writable) mode, mirroring
+  `C-u M-x compile`.
 - **`compilation-ask-about-save`** — modified buffers are offered for
   saving before launching.
 - **`compilation-auto-jump-to-first-error`** — jumps to the first error
@@ -898,10 +947,21 @@ buffer automatically.
 (ghostel-compile-global-mode 1)
 ```
 
-`grep-mode` falls through to the stock `compilation-start`
-implementation by default, because its output parsing and
-window-management conventions don't fit a live TTY.  Extend
-`ghostel-compile-global-mode-excluded-modes` to opt other modes out.
+How calls are routed:
+
+- Plain `M-x compile` (or any caller passing `MODE=nil`,
+  `compilation-mode`, or a `compilation-mode` subclass) → **read-only**
+  ghostel buffer (the compile-style default).  A subclass is
+  honoured: its error-regexp, font-lock keywords, and keymap take
+  effect when the buffer is finalized.
+- `C-u M-x compile` (i.e. `compilation-start COMMAND t`, the comint
+  variant) → **interactive** ghostel buffer instead of stock
+  `comint-mode`.  You still get a real TTY for the command, just
+  with the writable behaviour the caller asked for.
+- `grep-mode` falls through to the stock `compilation-start`
+  implementation, because its output parsing and window-management
+  conventions don't fit a live TTY.  Extend
+  `ghostel-compile-global-mode-excluded-modes` to opt other modes out.
 
 Ghostel-specific customisation:
 
