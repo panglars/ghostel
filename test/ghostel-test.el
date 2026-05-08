@@ -3769,6 +3769,274 @@ narrow input after the wide char keeps growing the region."
       (kill-buffer buf))))
 
 ;; -----------------------------------------------------------------------
+;; Test: password prompt detection
+;; -----------------------------------------------------------------------
+
+(ert-deftest ghostel-test-pty-password-input-p-detects-stty-no-echo ()
+  "Report t when a child's tty has ECHO off and ICANON on.
+This is the libghostty heuristic (canonical && !echo) replicated in
+the Zig binding.  Spawn a shell that does `stty -echo' and poll
+until the change takes effect."
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((buf (generate-new-buffer " *ghostel-test-pwd-stty*"))
+         (proc (start-process "ghostel-test-pwd-stty" buf
+                              "/bin/sh" "-c" "stty -echo; sleep 30")))
+    (set-process-query-on-exit-flag proc nil)
+    (unwind-protect
+        (let ((tty (process-tty-name proc)))
+          (should tty)
+          (ghostel-test--wait-for
+           proc (lambda () (ghostel--pty-password-input-p tty)) 5)
+          (should (ghostel--pty-password-input-p tty)))
+      (when (process-live-p proc) (kill-process proc))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-pty-password-input-p-default-is-nil ()
+  "Cooked-mode tty (canonical + echo) returns nil from the heuristic.
+Emacs's default pty starts with echo OFF (Emacs handles echo itself),
+so `stty sane' is required to mimic a normal shell prompt — which is
+exactly what `ghostel--spawn-pty' does at startup."
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((buf (generate-new-buffer " *ghostel-test-pwd-cooked*"))
+         (proc (start-process "ghostel-test-pwd-cooked" buf
+                              "/bin/sh" "-c" "stty sane; sleep 30")))
+    (set-process-query-on-exit-flag proc nil)
+    (unwind-protect
+        (let ((tty (process-tty-name proc)))
+          (should tty)
+          ;; Wait for stty sane to take effect.
+          (ghostel-test--wait-for
+           proc (lambda () (not (ghostel--pty-password-input-p tty))) 5)
+          (should-not (ghostel--pty-password-input-p tty)))
+      (when (process-live-p proc) (kill-process proc))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-pty-password-input-p-non-tty-returns-nil ()
+  "Non-tty / nonexistent paths return nil rather than erroring."
+  (should-not (ghostel--pty-password-input-p "/dev/null"))
+  (should-not (ghostel--pty-password-input-p
+               "/tmp/ghostel-test-does-not-exist-7c4af2")))
+
+(ert-deftest ghostel-test-password-detect-regex-fallback ()
+  "When the libghostty heuristic returns nil, the regex fallback fires.
+Feeds a `[sudo] password for ...:' prompt into the terminal, asserts
+`ghostel--password-prompt-detected-p' returns t with the heuristic
+stubbed to nil."
+  (let ((buf (generate-new-buffer " *ghostel-test-pwd-regex*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel--term (ghostel--new 5 80 1000))
+          (setq ghostel--term-rows 5)
+          (ghostel--write-input ghostel--term "[sudo] password for alice: ")
+          (let ((inhibit-read-only t))
+            (ghostel--redraw ghostel--term t))
+          (cl-letf (((symbol-function 'ghostel--pty-password-input-p)
+                     (lambda (_path) nil)))
+            (should (ghostel--password-prompt-detected-p))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest ghostel-test-password-detect-regex-no-false-positive ()
+  "Cursor row that doesn't match any regex returns nil from the fallback."
+  (let ((buf (generate-new-buffer " *ghostel-test-pwd-no-match*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel--term (ghostel--new 5 80 1000))
+          (setq ghostel--term-rows 5)
+          (ghostel--write-input ghostel--term "$ ls -la")
+          (let ((inhibit-read-only t))
+            (ghostel--redraw ghostel--term t))
+          (cl-letf (((symbol-function 'ghostel--pty-password-input-p)
+                     (lambda (_path) nil)))
+            (should-not (ghostel--password-prompt-detected-p))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest ghostel-test-prompt-password-sends-via-subprocess ()
+  "Send the source's return value to the subprocess with a CR.
+Plain RET on a tty produces CR, so we send the password followed
+by CR and clear state.  Regression check: must NOT send via
+`ghostel--write-input' (the local VT parser) — that path echoes
+the password into the terminal buffer and never
+reaches the real subprocess."
+  (let ((buf (generate-new-buffer " *ghostel-test-pwd-dispatch*"))
+        (sent nil)
+        (vt-input nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel--term (ghostel--new 5 80 1000))
+          (setq ghostel--term-rows 5)
+          (setq ghostel--process 'fake-proc)
+          (setq ghostel--password-mode-p t)
+          (let ((ghostel-password-prompt-functions
+                 (list (lambda (_row) "hunter2"))))
+            (cl-letf (((symbol-function 'processp) (lambda (_p) t))
+                      ((symbol-function 'process-live-p) (lambda (_p) t))
+                      ((symbol-function 'process-send-string)
+                       (lambda (_proc data) (push (copy-sequence data) sent)))
+                      ((symbol-function 'ghostel--write-input)
+                       (lambda (_term data) (push data vt-input))))
+              (ghostel--prompt-password)))
+          (should (equal sent '("hunter2\r")))
+          (should-not vt-input)
+          (should-not ghostel--password-mode-p))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest ghostel-test-prompt-password-clears-wire-copy ()
+  "Clear the freshly allocated wire copy after the send.
+The password+CR string is `clear-string'd so the secret doesn't sit
+in the heap until the next GC.  Captures the actual reference — not
+a copy — and asserts every byte is zero after
+`ghostel--prompt-password' returns."
+  (let ((buf (generate-new-buffer " *ghostel-test-pwd-clear*"))
+        (wire-ref nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel--term (ghostel--new 5 80 1000))
+          (setq ghostel--term-rows 5)
+          (setq ghostel--process 'fake-proc)
+          (setq ghostel--password-mode-p t)
+          (let ((ghostel-password-prompt-functions
+                 (list (lambda (_row) "hunter2"))))
+            (cl-letf (((symbol-function 'processp) (lambda (_p) t))
+                      ((symbol-function 'process-live-p) (lambda (_p) t))
+                      ((symbol-function 'process-send-string)
+                       (lambda (_proc data) (setq wire-ref data))))
+              (ghostel--prompt-password)))
+          (should wire-ref)
+          (should (= 8 (length wire-ref)))               ; "hunter2\r" length
+          (should (cl-every #'zerop (string-to-list wire-ref))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest ghostel-test-prompt-password-tries-sources-in-order ()
+  "First source returning non-nil wins; later sources don't run.
+Sources returning nil are skipped so a chain like \"auth-source first,
+read-passwd as fallback\" works without each handler reimplementing
+the fallback logic."
+  (let ((buf (generate-new-buffer " *ghostel-test-pwd-chain*"))
+        (sent nil)
+        (chain nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel--term (ghostel--new 5 80 1000))
+          (setq ghostel--term-rows 5)
+          (setq ghostel--process 'fake-proc)
+          (setq ghostel--password-mode-p t)
+          (let ((ghostel-password-prompt-functions
+                 (list (lambda (_row) (push 'first chain) nil)
+                       (lambda (_row) (push 'second chain) "from-second")
+                       (lambda (_row) (push 'third chain) "should-not-run"))))
+            (cl-letf (((symbol-function 'processp) (lambda (_p) t))
+                      ((symbol-function 'process-live-p) (lambda (_p) t))
+                      ((symbol-function 'process-send-string)
+                       (lambda (_proc data) (push (copy-sequence data) sent))))
+              (ghostel--prompt-password)))
+          (should (equal sent '("from-second\r")))
+          (should (equal chain '(second first))))  ; reversed push order
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest ghostel-test-prompt-password-resets-state-on-quit ()
+  "Reset state when all sources return nil or a source quits.
+The indicator clears and the cursor-suppression arms — same as
+a successful submission."
+  (let ((buf (generate-new-buffer " *ghostel-test-pwd-quit*"))
+        (sent nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel--term (ghostel--new 5 80 1000))
+          (setq ghostel--term-rows 5)
+          (setq ghostel--process 'fake-proc)
+          (setq ghostel--password-mode-p t)
+          (let ((ghostel-password-prompt-functions
+                 (list (lambda (_row) nil) (lambda (_row) nil))))
+            (cl-letf (((symbol-function 'process-send-string)
+                       (lambda (_proc data) (push (copy-sequence data) sent))))
+              (ghostel--prompt-password)))
+          (should-not sent)
+          (should-not ghostel--password-mode-p)
+          (should ghostel--password-handled-cursor))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest ghostel-test-detect-password-prompt-fires-once-per-edge ()
+  "Hook fires on rising edge only; falling edge clears state."
+  (let* ((buf (generate-new-buffer " *ghostel-test-pwd-edge*"))
+         (calls 0)
+         (now nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel--term (ghostel--new 5 80 1000))
+          (setq ghostel--term-rows 5)
+          (let ((ghostel-password-prompt-functions
+                 (list (lambda (_row) (cl-incf calls) nil))))
+            (cl-letf (((symbol-function 'ghostel--password-prompt-detected-p)
+                       (lambda () now)))
+              (setq now t)
+              (ghostel--detect-password-prompt)
+              (should ghostel--password-mode-p)
+              (sleep-for 0.05)
+              (should (= 1 calls))
+              ;; Re-detect while indicator already on → no extra fire.
+              (ghostel--detect-password-prompt)
+              (sleep-for 0.05)
+              (should (= 1 calls))
+              ;; Falling edge clears state.
+              (setq now nil)
+              (ghostel--detect-password-prompt)
+              (should-not ghostel--password-mode-p)
+              (sleep-for 0.05)
+              (should (= 1 calls)))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest ghostel-test-detect-suppresses-while-on-handled-row ()
+  "Suppress re-fire while the cursor stays on the just-handled row.
+Regression: sudo (and friends) hold the tty in canonical+!echo for
+tens of milliseconds after read() returns; the next PTY chunk would
+otherwise look like a fresh rising edge and pop a second
+`read-passwd' minibuffer."
+  (let* ((buf (generate-new-buffer " *ghostel-test-pwd-suppress*"))
+         (calls 0))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel--term (ghostel--new 5 80 1000))
+          (setq ghostel--term-rows 5)
+          (let ((ghostel-password-prompt-functions
+                 (list (lambda (_row) (cl-incf calls) nil))))
+            (cl-letf (((symbol-function 'ghostel--password-prompt-detected-p)
+                       (lambda () t))
+                      ((symbol-function 'ghostel--cursor-position)
+                       (lambda (_term) '(0 . 2))))
+              ;; Initial rising edge fires once.
+              (ghostel--detect-password-prompt)
+              (sleep-for 0.05)
+              (should (= 1 calls))
+              ;; Simulate the handler returning on the same row.
+              (setq ghostel--password-mode-p nil
+                    ghostel--password-handled-cursor '(0 . 2))
+              ;; Detector ticks while echo is still off and cursor unchanged
+              ;; → must NOT fire again.
+              (ghostel--detect-password-prompt)
+              (ghostel--detect-password-prompt)
+              (sleep-for 0.05)
+              (should (= 1 calls))
+              (should-not ghostel--password-mode-p))
+            ;; Cursor moves to a new row (sudo's `Sorry, try again.' or
+            ;; the next program's prompt).  Detector must re-fire.
+            (cl-letf (((symbol-function 'ghostel--password-prompt-detected-p)
+                       (lambda () t))
+                      ((symbol-function 'ghostel--cursor-position)
+                       (lambda (_term) '(0 . 4))))
+              (ghostel--detect-password-prompt)
+              (sleep-for 0.05)
+              (should (= 2 calls)))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+;; -----------------------------------------------------------------------
 ;; Test: ghostel-command-finish-functions hook
 ;; -----------------------------------------------------------------------
 

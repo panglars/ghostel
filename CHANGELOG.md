@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Password prompt detection.  When `sudo`, `ssh`, `gpg`, `passwd`,
+  etc. ask for a password ghostel pops up `read-passwd` and sends
+  the answer through the PTY — the keystrokes never flow through
+  Emacs's normal key pipeline, so the password does not land in
+  `view-lossage`, the recent-keys ring, or any keyboard-macro
+  recording.  Detection mirrors libghostty's heuristic (the slave
+  tty is in canonical mode with echo off) via a tiny `tcgetattr`
+  Zig binding, with a regex fallback on the cursor row when the
+  local tty's echo state can't be observed (remote ssh, programs
+  that don't toggle echo).  Mode-line shows ` 🔒Password` while a
+  prompt is open, the wire copy of the password is `clear-string`'d
+  immediately after the send, and wrong-password retries auto-detect
+  via cursor movement.  Customize `ghostel-password-prompt-functions`
+  — a chain of `(ROW) -> string-or-nil` sources tried in order — to
+  plug in `auth-source` (or Keepass / pass / etc); the
+  defcustom docstring includes a TRAMP-aware
+  `auth-source-pick-first-password` example.  PR
+  [#241](https://github.com/dakra/ghostel/pull/241).
+
 ## [0.22.1] — 2026-05-04
 
 ### Fixed

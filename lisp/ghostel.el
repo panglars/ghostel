@@ -423,6 +423,52 @@ Disabled by default for security: a malicious escape sequence in
 command output could silently overwrite your clipboard."
   :type 'boolean)
 
+(defcustom ghostel-password-prompt-regex
+  "[Pp]ass\\(?:word\\|phrase\\)[^:]*:[ \t]*\\'"
+  "Regex matched against the cursor row to detect a password prompt.
+Fallback for when `ghostel--pty-password-input-p' returns nil —
+typically remote ssh sessions, or programs that don't flip echo off.
+The default covers `Password:', `[sudo] password for X:', and
+`Enter passphrase for key …:'."
+  :type 'regexp)
+
+(defcustom ghostel-password-prompt-functions
+  '(ghostel--default-password-source)
+  "Sources tried in order to obtain a password when one is needed.
+Each function is called with one argument — ROW, the trimmed text
+of the cursor's row at the moment the prompt was detected, or
+nil when the row text isn't available.  Called inside the ghostel
+buffer when `ghostel--password-mode-p' transitions from nil to t.
+Should return a string (the password) or nil to defer to the next
+function.  The first non-nil return wins; ghostel sends that
+string + carriage return to the subprocess and clears the wire
+copy.  Beware: returning an empty string \"\" is treated as a
+hit (sudo will see it as a wrong password and re-prompt) — guard
+your sources to return nil on miss; never default a miss to \"\".
+
+The default `ghostel--default-password-source' reads with
+`read-passwd' and so always returns (unless the user
+`keyboard-quit's, which propagates).
+
+To plug in `auth-source' (or keepass, pass, etc) prepend a function that
+returns the looked-up secret on hit, nil on miss; the default acts as
+the fallback.  `default-directory' carries the TRAMP remote host when
+ghostel was spawned through TRAMP, so the same handler works for `sudo'
+on the local box and on a remote one:
+
+  (defun my-ghostel-auth-source (row)
+    (let* ((user (and row
+                      (string-match
+                       \"\\\\[sudo\\\\] .+ for \\\\([^:]+\\\\):\" row)
+                      (match-string 1 row)))
+           (host (or (file-remote-p default-directory \\='host)
+                     (system-name))))
+      (and user
+           (auth-source-pick-first-password :host host :user user))))
+
+  (add-hook \\='ghostel-password-prompt-functions #\\='my-ghostel-auth-source)"
+  :type 'hook)
+
 (defcustom ghostel-notification-function #'ghostel-default-notify
   "Function called for OSC 9 / OSC 777 desktop notifications.
 Called with two string arguments: TITLE and BODY.  Title is empty
@@ -768,6 +814,7 @@ or when the `bash-completion' package is not installed."
 (declare-function ghostel--set-size "ghostel-module" (term rows cols &optional cell-w cell-h))
 (declare-function ghostel--write-input "ghostel-module")
 (declare-function ghostel--native-uri-at "ghostel-module")
+(declare-function ghostel--pty-password-input-p "ghostel-module" (path))
 
 (declare-function spinner-create "spinner")
 (declare-function spinner-start "spinner")
@@ -2111,6 +2158,9 @@ has gone off and a prompt is locatable.  Cleared when the user
 manually switches input modes so a later alt-screen exit does not
 surprise them by force-resuming line mode.")
 
+(defvar ghostel--password-mode-p)         ; forward decls; defined below.
+(defvar ghostel--password-handled-cursor) ;
+
 (defvar-local ghostel--mode-line-tag nil
   "Current input-mode label rendered in `mode-line-process'.
 String like \":Char\" / \":Line\" / \":Copy\" / \":Emacs\", or
@@ -2142,7 +2192,9 @@ OSC 9;4 packet, and same-value packets must not fire FMLU."
                       (list ghostel--mode-line-tag
                             (and ghostel--spinner-active
                                  'spinner--mode-line-construct)
-                            ghostel--mode-line-progress)))
+                            ghostel--mode-line-progress
+                            (and ghostel--password-mode-p
+                                 (propertize " 🔒Password" 'face 'warning)))))
          (new-val (pcase parts
                     ('() nil)
                     (`(,only) only)
@@ -3996,6 +4048,157 @@ prompts while output continues streaming in."
   (ghostel--navigate-previous-prompt n))
 
 
+;;; Password prompt detection
+
+;; Mirrors libghostty's heuristic (canonical mode + echo off, see
+;; ghostty/src/termio/Exec.zig) so password input from sudo/ssh/gpg/etc is read
+;; through `read-passwd' instead of streamed through Emacs's key handling (where
+;; it would land in `view-lossage' and the recent-keys ring).  Falls back to a
+;; regex match on the cursor row for cases where the local tty's echo state
+;; can't be observed — remote ssh sessions, programs that don't toggle echo.
+
+(defvar-local ghostel--password-mode-p nil
+  "Non-nil while a password prompt is currently active.
+Set by `ghostel--detect-password-prompt' on the rising edge and
+cleared by the handler when the password is submitted (or
+aborted).  Used to render the mode-line indicator and to keep
+the rising-edge detector from running its hook twice for one
+prompt.")
+
+(defvar-local ghostel--password-handled-cursor nil
+  "Cursor (COL . ROW) where the most recent password handler returned.
+Detection is suppressed while the cursor still sits on this row.
+This bridges the race window between the user submitting a
+password and the foreground program restoring echo (sudo, ssh,
+gpg are all canonical+!echo for tens of milliseconds after they
+read), which would otherwise look like a fresh rising edge.
+Cleared automatically when the falling edge is observed (echo
+restored) or when the cursor moves to a different row — both
+naturally re-arm the detector for follow-on prompts (a second
+`sudo' in a script, a wrong-password retry that prints `Sorry,
+try again.' on a new row).")
+
+(defun ghostel--cursor-row-text ()
+  "Return the text of the row containing the terminal cursor, or nil.
+The text is taken from the buffer (post-redraw), without text
+properties, with trailing whitespace trimmed.  Returns nil for
+the empty row so callers can pass the result through `or' to a
+default."
+  (when ghostel--term
+    (let ((pos (ignore-errors (ghostel--cursor-position ghostel--term)))
+          (vp-start (ghostel--viewport-start)))
+      (when (and pos vp-start)
+        (save-excursion
+          (goto-char vp-start)
+          (forward-line (cdr pos))
+          (let ((line (string-trim-right
+                       (buffer-substring-no-properties
+                        (line-beginning-position) (line-end-position)))))
+            (and (not (string-empty-p line)) line)))))))
+
+(defun ghostel--password-prompt-detected-p ()
+  "Return non-nil if the foreground program looks like it's reading a password.
+Tries the libghostty heuristic first (canonical mode + echo off via
+`ghostel--pty-password-input-p'), then falls back to matching the
+cursor row against `ghostel-password-prompt-regex'."
+  (or (and (processp ghostel--process)
+           (process-live-p ghostel--process)
+           (when-let* ((tty (process-tty-name ghostel--process)))
+             (ghostel--pty-password-input-p tty)))
+      (when-let* ((row (ghostel--cursor-row-text)))
+        (string-match-p ghostel-password-prompt-regex row))))
+
+(defun ghostel--detect-password-prompt ()
+  "Update `ghostel--password-mode-p' and run hook on rising edge.
+Called from `ghostel--delayed-redraw' once the buffer reflects
+the latest output.  Suppresses re-fires while the cursor is
+still on the row where the previous handler returned (see
+`ghostel--password-handled-cursor')."
+  (let ((now (ghostel--password-prompt-detected-p))
+        (cursor (and ghostel--term
+                     (ignore-errors (ghostel--cursor-position ghostel--term)))))
+    (cond
+     ;; Echo back on — clear all state so a future prompt re-arms.
+     ((not now)
+      (when (or ghostel--password-mode-p ghostel--password-handled-cursor)
+        (setq ghostel--password-mode-p nil
+              ghostel--password-handled-cursor nil)
+        (ghostel--mode-line-refresh)))
+     ;; Already showing the indicator (handler is in flight).
+     (ghostel--password-mode-p nil)
+     ;; Just-handled prompt — wait for the cursor to move off the row.
+     ((and ghostel--password-handled-cursor
+           cursor
+           (equal cursor ghostel--password-handled-cursor))
+      nil)
+     ;; Rising edge: a fresh prompt or a retry on a new row.
+     (t
+      (setq ghostel--password-mode-p t
+            ghostel--password-handled-cursor nil)
+      (ghostel--mode-line-refresh)
+      ;; Defer so the prompt minibuffer doesn't open from inside the
+      ;; process filter — opening it there blocks further PTY output
+      ;; until the user submits.
+      (let ((buf (current-buffer)))
+        (run-at-time
+         0 nil
+         (lambda ()
+           (when (buffer-live-p buf)
+             (with-current-buffer buf
+               (when ghostel--password-mode-p
+                 (ghostel--prompt-password)))))))))))
+
+(defun ghostel--default-password-source (row)
+  "Default password source: prompt with `read-passwd'.
+ROW is the cursor row text (used as the prompt label); falls back
+to \"Password:\" when nil.  Always returns a string (or signals
+quit on `keyboard-quit'), so this source - at the tail of
+`ghostel-password-prompt-functions' - acts as the fallback once
+any prepended sources have returned nil."
+  (read-passwd (concat (or row "Password:") " ")))
+
+(defun ghostel--prompt-password ()
+  "Run `ghostel-password-prompt-functions' until one returns a password.
+The cursor row text is captured once and passed to each source,
+so handlers that match against the prompt don't each pay for a
+separate buffer scan.  Sends the result + carriage return to the
+subprocess, clears the string, and arms the post-submission
+suppression so the detector doesn't re-fire while the foreground
+program restores echo.  State cleanup runs even when a source
+signals quit (`keyboard-quit' during `read-passwd'), so the
+indicator and suppression always reach a sane state."
+  (let ((pwd nil)
+        (row (ghostel--cursor-row-text)))
+    (unwind-protect
+        (setq pwd (run-hook-with-args-until-success
+                   'ghostel-password-prompt-functions
+                   row))
+      ;; The (concat pwd "\r") wire copy is freshly allocated and owned by us,
+      ;; so `clear-string' it after the send.  Nested `unwind-protect' so the
+      ;; wire is cleared even if `process-send-string' errors (e.g. process died
+      ;; between `process-live-p' and the send).
+      ;;
+      ;; Deliberately do NOT clear PWD itself: an `auth-source' backend that
+      ;; returns the secret as a string may share that string with the
+      ;; auth-source cache (the :secret in the cached plist).  Clearing it would
+      ;; zero the cache in place and break later lookups.  The default
+      ;; `ghostel--default-password-source' uses `read-passwd' which returns a new
+      ;; string; that one lives until GC.  Sources whose backend hands out shared
+      ;; strings should `copy-sequence' before returning if they want clearing.
+      (when pwd
+        (let ((wire (concat pwd "\r")))
+          (unwind-protect
+              (when (and (processp ghostel--process)
+                         (process-live-p ghostel--process))
+                (process-send-string ghostel--process wire))
+            (clear-string wire))))
+      (setq ghostel--password-handled-cursor
+            (and ghostel--term
+                 (ignore-errors (ghostel--cursor-position ghostel--term))))
+      (setq ghostel--password-mode-p nil)
+      (ghostel--mode-line-refresh))))
+
+
 ;;; Callbacks from native module
 
 (defun ghostel--osc51-eval (str)
@@ -5398,7 +5601,8 @@ new output arrives."
               ;; update the alt-screen-prev cache for the next cycle.
               (ghostel--line-mode-post-redraw)))
           (setq ghostel--snap-requested nil)
-          (setq ghostel--windows-needing-snap nil))))))
+          (setq ghostel--windows-needing-snap nil))
+        (ghostel--detect-password-prompt)))))
 
 
 (defun ghostel-force-redraw ()

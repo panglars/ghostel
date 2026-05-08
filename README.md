@@ -346,6 +346,12 @@ history in **any** mode that has a read-only buffer (Emacs or copy).
 - Focus events gated by DEC mode 1004
 - Drag-and-drop (file paths and text)
 
+### Password prompt detection
+- When `sudo`, `ssh`, `gpg`, `passwd`, etc. ask for a password, ghostel pops up `read-passwd` and sends the answer through the PTY — keystrokes never flow through Emacs's normal key pipeline, so the password does **not** land in `view-lossage`, the recent-keys ring, or any keyboard-macro recording.
+- Detection mirrors libghostty's heuristic — the slave tty is in canonical mode with echo off — via a tiny `tcgetattr` Zig binding, with a regex fallback on the cursor row for cases where the local tty's echo state can't be observed (remote ssh, programs that don't toggle echo).
+- Mode-line shows ` 🔒Password` while a prompt is open. Wrong-password retries auto-detect (cursor moves to the new prompt row). The wire copy of the password is `clear-string`'d immediately after the send so it doesn't sit in the heap.
+- Extensible via `ghostel-password-prompt-functions` — a chain of `(ROW) -> string-or-nil` sources tried in order. Default reads with `read-passwd`; users prepend their own (auth-source / Keepass / pass / etc) and the default acts as the fallback. The defcustom docstring includes a TRAMP-aware `auth-source-pick-first-password` example.
+
 ### Shell Integration
 - Automatic injection for bash, zsh, and fish — no shell RC edits needed
 - **OSC 7** — directory tracking (`default-directory` follows the shell's cwd, TRAMP-aware for remote hosts)
@@ -1214,37 +1220,38 @@ powering Neovim's built-in terminal.
 
 ### Feature comparison
 
-| Feature                       | ghostel   | vterm   |
-|-------------------------------|-----------|---------|
-| True color (24-bit)           | Yes       | Yes     |
-| OSC 4/10/11 color queries     | Yes       | No      |
-| Bold / italic / faint         | Yes       | Yes     |
-| Underline styles (5 types)    | Yes       | No      |
-| Underline color               | Yes       | No      |
-| Strikethrough                 | Yes       | Yes     |
-| Cursor styles                 | 4 types   | 3 types |
-| OSC 8 hyperlinks              | Yes       | No      |
-| Plain-text URL/file detection | Yes       | No      |
-| OSC 9 / 777 notifications     | Yes       | No      |
-| OSC 9;4 progress reports      | Yes       | No      |
-| Kitty graphics protocol       | Yes       | No      |
-| Kitty keyboard protocol       | Yes       | No      |
-| Mouse passthrough (SGR)       | Yes       | No      |
-| Bracketed paste               | Yes       | Yes     |
-| Alternate screen              | Yes       | Yes     |
-| Shell integration auto-inject | Yes       | No      |
-| Prompt navigation (OSC 133)   | Yes       | Yes     |
-| Elisp eval from shell         | Yes       | Yes     |
-| TRAMP remote terminals        | Yes       | Yes     |
-| OSC 52 clipboard              | Yes       | Yes     |
-| Copy mode                     | Yes       | Yes     |
-| Char mode (runtime toggle)    | Yes       | No      |
-| Line mode (local editing)     | Yes       | No      |
-| Emacs mode (read-only, live)  | Yes       | No      |
-| Drag-and-drop                 | Yes       | No      |
-| Auto module download          | Yes       | No      |
-| Scrollback default            | ~5,000    | 1,000   |
-| PTY throughput (plain ASCII)  | 81 MB/s   | 34 MB/s |
+| Feature                       | ghostel  | vterm    |
+|-------------------------------|----------|----------|
+| True color (24-bit)           | ✅       | ✅       |
+| OSC 4/10/11 color queries     | ✅       | ❌       |
+| Bold / italic / faint         | ✅       | ✅       |
+| Underline styles (5 types)    | ✅       | ❌       |
+| Underline color               | ✅       | ❌       |
+| Strikethrough                 | ✅       | ✅       |
+| Cursor styles                 | 4 types  | 3 types  |
+| OSC 8 hyperlinks              | ✅       | ❌       |
+| Plain-text URL/file detection | ✅       | ❌       |
+| OSC 9 / 777 notifications     | ✅       | ❌       |
+| OSC 9;4 progress reports      | ✅       | ❌       |
+| Kitty graphics protocol       | ✅       | ❌       |
+| Kitty keyboard protocol       | ✅       | ❌       |
+| Mouse passthrough (SGR)       | ✅       | ❌       |
+| Bracketed paste               | ✅       | ✅       |
+| Alternate screen              | ✅       | ✅       |
+| Shell integration auto-inject | ✅       | ❌       |
+| Prompt navigation (OSC 133)   | ✅       | ✅       |
+| Elisp eval from shell         | ✅       | ✅       |
+| TRAMP remote terminals        | ✅       | ✅       |
+| OSC 52 clipboard              | ✅       | ✅       |
+| Copy mode                     | ✅       | ✅       |
+| Char mode (runtime toggle)    | ✅       | ❌       |
+| Line mode (local editing)     | ✅       | ❌       |
+| Emacs mode (read-only, live)  | ✅       | ❌       |
+| Drag-and-drop                 | ✅       | ❌       |
+| Password prompt detection     | ✅       | ❌       |
+| Auto module download          | ✅       | ❌       |
+| Scrollback default            | ~5,000   | 1,000    |
+| PTY throughput (plain ASCII)  | 81 MB/s  | 34 MB/s  |
 | Default redraw rate           | ~30 fps   | ~10 fps |
 
 ### Key differences
@@ -1288,6 +1295,16 @@ defaults to ~30 fps redraw; vterm defaults to ~10 fps.
 bash, zsh, and fish — no shell RC changes needed.  vterm requires manually
 sourcing scripts in your shell configuration.  Both support Elisp eval from
 the shell and TRAMP-aware remote directory tracking.
+
+**Password prompts.**  Ghostel detects when the foreground program is reading
+a password (`sudo`, `ssh`, `gpg`, …) and prompts via `read-passwd`, sending
+the answer down the PTY without routing keystrokes through Emacs's normal
+key pipeline.  vterm has no such interception: each character of your
+password is a regular keypress, so it ends up in `view-lossage`, the
+recent-keys ring, and anything else that observes the key pipeline (e.g.
+keyboard macros being recorded).  Ghostel's hook also lets you plug in
+`auth-source` to satisfy known prompts without typing — see
+[Password prompt detection](#password-prompt-detection) above.
 
 **Performance.**  In PTY throughput benchmarks (1 MB streamed through `cat`,
 both backends configured with ~1,000 lines of scrollback), ghostel is
