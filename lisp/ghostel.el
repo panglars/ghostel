@@ -4048,6 +4048,122 @@ prompts while output continues streaming in."
   (ghostel--navigate-previous-prompt n))
 
 
+
+;;; OSC 133 imenu integration
+
+;; Each OSC 133 prompt becomes an imenu entry.  Label is
+;; "<cwd>  <command>"; target is the prompt prefix's start.
+;; Composes with `consult-imenu', `imenu-list', evil's `]m'/`[m'.
+;;
+;; The cwd is captured at OSC 133 'C' (command-start) and pushed
+;; onto `ghostel--imenu-cwds', a chronological list (newest-first).
+;; Reading `default-directory' lazily at index time would
+;; mis-attribute every prior prompt to the *current* cwd after a
+;; `cd'.
+;;
+;; Position-based tracking (text properties or markers) does not
+;; survive: the renderer's per-row delete+reinsert wipes ad-hoc
+;; text properties on dirty rows, and `eraseBuffer' (resize-cols,
+;; force-full redraw, scrollback edge cases) collapses every marker
+;; to `point-min'.  Pairing chronological cwds with the
+;; `ghostel-prompt' regions in buffer order at index time is robust
+;; to both: resize reflows the grid but preserves prompt order;
+;; scrollback eviction is detected as (cwd-count > region-count)
+;; and the oldest cwds are dropped to realign.
+
+(defvar-local ghostel--imenu-cwds nil
+  "Chronological list of cwds for prompts that have had OSC 133 \\='C\\=' fire.
+Pushed at command-start time, so newest-first.  Aligned by order
+to the `ghostel-prompt' regions in the buffer when the index is
+built.")
+
+(defun ghostel--imenu-stamp-cwd (buffer)
+  "Record BUFFER's `default-directory' for its most recent submitted command.
+Hung off `ghostel-command-start-functions' (OSC 133 \\='C\\=')."
+  (with-current-buffer buffer
+    (push default-directory ghostel--imenu-cwds)))
+
+(defun ghostel--imenu--collect-prompt-regions ()
+  "Return a list of (START . PREFIX-END) for every `ghostel-prompt' region.
+Ordered by buffer position (oldest first)."
+  (let ((regions nil)
+        (pos (point-min))
+        (end (point-max)))
+    (while (setq pos (text-property-any pos end 'ghostel-prompt t))
+      (let ((rend (or (next-single-property-change pos 'ghostel-prompt nil end)
+                      end)))
+        (push (cons pos rend) regions)
+        (setq pos rend)))
+    (nreverse regions)))
+
+(defun ghostel--imenu-create-index ()
+  "Build an imenu alist of OSC 133 prompts in the current buffer.
+Each entry's label is \"<cwd>  <command>\"; cwd is omitted when no
+recorded entry aligns with the region (e.g. a still-active prompt
+whose \\='C\\=' has not fired).  Empty-command prompts are
+skipped.  Labels are truncated to 80 columns."
+  (let* ((regions (ghostel--imenu--collect-prompt-regions))
+         (cwds (reverse ghostel--imenu-cwds))    ; oldest first
+         ;; Scrollback eviction removes prompts from the buffer top
+         ;; but leaves cwds in the list.  Drop the oldest cwds so
+         ;; the remaining list aligns with the current regions.
+         (extra (max 0 (- (length cwds) (length regions))))
+         (cwds (nthcdr extra cwds))
+         ;; Trim the stored list opportunistically so it doesn't
+         ;; grow unboundedly across long sessions.
+         (_ (when (> extra 0)
+              (setq ghostel--imenu-cwds
+                    (seq-take ghostel--imenu-cwds (- (length ghostel--imenu-cwds)
+                                                     extra)))))
+         (index nil))
+    (cl-loop for region in regions
+             for cwd = (pop cwds)
+             do (let* ((pos (car region))
+                       (prompt-end (cdr region))
+                       (cmd-end (save-excursion
+                                  (goto-char prompt-end)
+                                  (line-end-position)))
+                       (cmd (string-trim
+                             (buffer-substring-no-properties prompt-end cmd-end))))
+                  (unless (string-empty-p cmd)
+                    (let ((label (if cwd
+                                     (format "%s  %s"
+                                             (abbreviate-file-name
+                                              (directory-file-name cwd))
+                                             cmd)
+                                   cmd)))
+                      (push (cons (truncate-string-to-width label 80 nil nil t)
+                                  pos)
+                            index)))))
+    (nreverse index)))
+
+(defun ghostel--imenu-goto (_name position &rest _)
+  "Jump to POSITION, then advance past the prompt prefix.
+Switches to Emacs mode first in semi-char/char modes (where
+point would otherwise be yanked back to the live cursor on the
+next redraw).  Line mode is preserved — `ghostel--window-anchored-p'
+treats a window with `window-point' in scrollback as non-anchored,
+so the redraw's restore path keeps point where the jump put it.
+Mirrors the landing position used by `ghostel-next-prompt'."
+  (unless (memq ghostel--input-mode '(emacs line copy))
+    (ghostel-emacs-mode))
+  (when (or (< position (point-min)) (> position (point-max)))
+    (widen))
+  (goto-char position)
+  (ghostel--prompt-input-start))
+
+(defun ghostel-imenu-setup ()
+  "Wire OSC 133 prompts as imenu entries in the current buffer.
+Sets `imenu-create-index-function' and `imenu-default-goto-function',
+and registers the cwd-stamping hook on
+`ghostel-command-start-functions'."
+  (setq-local imenu-create-index-function #'ghostel--imenu-create-index)
+  (setq-local imenu-default-goto-function #'ghostel--imenu-goto)
+  (add-hook 'ghostel-command-start-functions
+            #'ghostel--imenu-stamp-cwd nil t))
+
+
+
 ;;; Password prompt detection
 
 ;; Mirrors libghostty's heuristic (canonical mode + echo off, see
@@ -5783,6 +5899,7 @@ output is arriving."
   (add-hook 'window-buffer-change-functions
             #'ghostel--reshow-snap nil t)
   (ghostel--suppress-interfering-modes)
+  (ghostel-imenu-setup)
   (setq ghostel--scroll-intercept-active t)
   ;; Let C-g reach the keymap instead of triggering keyboard-quit.
   ;; When inhibit-quit is non-nil, C-g sets quit-flag and delivers

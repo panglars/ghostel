@@ -5652,6 +5652,202 @@ prefix only, `ghostel-input' on the user-typed command."
     (should (looking-at "echo bb cc"))))
 
 ;; -----------------------------------------------------------------------
+;; Test: imenu integration over OSC 133 prompts
+;; -----------------------------------------------------------------------
+
+(defun ghostel-test--insert-prompts-with-cwds (specs)
+  "Insert prompts per SPECS and push cwds in chronological order.
+Each SPEC is (PREFIX INPUT CWD).  Cwds are pushed in order so the
+newest-first list aligns with the buffer-order regions."
+  (dolist (spec specs)
+    (pcase-let ((`(,prefix ,input ,cwd) spec))
+      (ghostel-test--insert-prompt prefix input)
+      (push cwd ghostel--imenu-cwds))))
+
+(ert-deftest ghostel-test-imenu-empty-buffer ()
+  "Empty buffer yields an empty imenu index."
+  (with-temp-buffer
+    (should (null (ghostel--imenu-create-index)))))
+
+(ert-deftest ghostel-test-imenu-single-prompt ()
+  "Single prompt+command produces one entry; label = command (no cwd stamped)."
+  (with-temp-buffer
+    (ghostel-test--insert-prompt "$ " "make build")
+    (let ((index (ghostel--imenu-create-index)))
+      (should (equal 1 (length index)))
+      (should (equal "make build" (caar index)))
+      (should (= 1 (cdar index))))))             ; pos at point-min
+
+(ert-deftest ghostel-test-imenu-skips-empty-commands ()
+  "Prompts with no typed command are skipped."
+  (with-temp-buffer
+    (ghostel-test--insert-prompt "$ ")            ; empty
+    (ghostel-test--insert-prompt "$ " "ls")
+    (ghostel-test--insert-prompt "$ ")            ; empty
+    (let ((index (ghostel--imenu-create-index)))
+      (should (equal 1 (length index)))
+      (should (equal "ls" (caar index))))))
+
+(ert-deftest ghostel-test-imenu-cwd-attribution ()
+  "Each entry's label uses its OWN recorded cwd, not the buffer's current one."
+  (with-temp-buffer
+    (ghostel-test--insert-prompts-with-cwds
+     '(("$ " "make" "/foo/")
+       ("$ " "test" "/bar/")))
+    (let* ((index (ghostel--imenu-create-index))
+           (labels (mapcar #'car index)))
+      (should (equal 2 (length index)))
+      ;; abbreviate-file-name on /foo/ yields "/foo" after directory-file-name.
+      (should (string-match-p "\\`/foo  make\\'" (nth 0 labels)))
+      (should (string-match-p "\\`/bar  test\\'" (nth 1 labels))))))
+
+(ert-deftest ghostel-test-imenu-multi-line-command ()
+  "Label uses only the first line of a multi-line command."
+  (with-temp-buffer
+    (ghostel-test--insert-prompt "$ " "echo a\nbb\ncc")
+    (let ((index (ghostel--imenu-create-index)))
+      (should (equal 1 (length index)))
+      (should (equal "echo a" (caar index))))))
+
+(ert-deftest ghostel-test-imenu-truncates-long-command ()
+  "Labels longer than 80 columns are truncated."
+  (with-temp-buffer
+    (ghostel-test--insert-prompt "$ " (make-string 200 ?x))
+    (let* ((index (ghostel--imenu-create-index))
+           (label (caar index)))
+      (should (<= (string-width label) 80)))))
+
+(ert-deftest ghostel-test-imenu-stamp-cwd-hook ()
+  "Stamping at OSC 133 \\='C\\=' records the current cwd against the prompt."
+  (with-temp-buffer
+    (ghostel-test--insert-prompt "$ " "make")
+    (let ((default-directory "/tmp/work/"))
+      (ghostel--imenu-stamp-cwd (current-buffer)))
+    (let* ((index (ghostel--imenu-create-index))
+           (label (caar index)))
+      (should (equal 1 (length index)))
+      (should (string-match-p "\\`/tmp/work  make\\'" label)))))
+
+(ert-deftest ghostel-test-imenu-survives-buffer-rebuild ()
+  "Cwd attribution survives an `eraseBuffer'-style rebuild (resize/force-full).
+Prompts are rebuilt at new buffer positions but in the same order;
+the chronological cwds list must re-align without loss."
+  (with-temp-buffer
+    (ghostel-test--insert-prompts-with-cwds
+     '(("$ " "make" "/foo/")
+       ("$ " "test" "/bar/")))
+    ;; Simulate `eraseBuffer' wiping everything, then the renderer
+    ;; rebuilding the same prompts at fresh buffer positions (e.g. with
+    ;; an extra padding line after a row reflow).
+    (erase-buffer)
+    (insert "\n")                                ; reflow padding
+    (ghostel-test--insert-prompt "$ " "make")
+    (ghostel-test--insert-prompt "$ " "test")
+    (let* ((index (ghostel--imenu-create-index))
+           (labels (mapcar #'car index)))
+      (should (equal 2 (length index)))
+      (should (string-match-p "\\`/foo  make\\'" (nth 0 labels)))
+      (should (string-match-p "\\`/bar  test\\'" (nth 1 labels))))))
+
+(ert-deftest ghostel-test-imenu-eviction-drops-oldest-cwds ()
+  "When prompts are evicted from the top, the oldest cwds are dropped.
+Otherwise the surviving prompts would be mis-attributed to the
+evicted prompts' cwds."
+  (with-temp-buffer
+    (ghostel-test--insert-prompts-with-cwds
+     '(("$ " "old1" "/evicted1/")
+       ("$ " "old2" "/evicted2/")
+       ("$ " "live" "/live/")))
+    ;; Evict the two oldest prompts (rows 1 and 2).
+    (goto-char (point-min))
+    (forward-line 2)
+    (delete-region (point-min) (point))
+    (let* ((index (ghostel--imenu-create-index))
+           (labels (mapcar #'car index)))
+      (should (equal 1 (length index)))
+      (should (string-match-p "\\`/live  live\\'" (car labels)))
+      ;; The cwds list must be trimmed to match.
+      (should (equal 1 (length ghostel--imenu-cwds)))
+      (should (equal "/live/" (car ghostel--imenu-cwds))))))
+
+(ert-deftest ghostel-test-imenu-active-prompt-no-cwd-yet ()
+  "An active prompt (no \\='C\\=' fired yet) gets no cwd; older prompts unaffected."
+  (with-temp-buffer
+    (ghostel-test--insert-prompts-with-cwds
+     '(("$ " "make" "/foo/")))
+    (ghostel-test--insert-prompt "$ ")            ; active prompt, empty input
+    ;; Push a typed in-progress command without firing C yet.
+    (let* ((index (ghostel--imenu-create-index))
+           (labels (mapcar #'car index)))
+      (should (equal 1 (length index)))           ; active prompt has empty cmd, skipped
+      (should (string-match-p "\\`/foo  make\\'" (car labels))))))
+
+(ert-deftest ghostel-test-imenu-goto-lands-at-input-start ()
+  "Goto lands point past the prompt prefix, on the typed command.
+Mirrors `ghostel-next-prompt': the index entry points at the
+prompt-prefix start (column 0), but goto must advance past the
+prefix so point sits where the user would type."
+  (with-temp-buffer
+    (ghostel-test--insert-prompt "$ " "make build")
+    (setq-local ghostel--input-mode 'emacs)
+    (ghostel--imenu-goto "make build" 1)
+    ;; "$ " is 2 chars; point should land at the start of "make build" (pos 3).
+    (should (= (point) 3))
+    (should (looking-at "make build"))))
+
+(ert-deftest ghostel-test-imenu-goto-switches-to-emacs-mode ()
+  "Selecting an imenu entry from semi-char mode switches to Emacs mode.
+Without the switch, the renderer would yank point back to the
+live cursor on the next redraw and the jump would be invisible."
+  (let ((emacs-mode-called nil))
+    (with-temp-buffer
+      (ghostel-test--insert-prompt "$ " "make")
+      (setq-local ghostel--input-mode 'semi-char)
+      (cl-letf (((symbol-function 'ghostel-emacs-mode)
+                 (lambda () (setq emacs-mode-called t)
+                   (setq ghostel--input-mode 'emacs))))
+        (ghostel--imenu-goto "make" 1))
+      (should emacs-mode-called))))
+
+(ert-deftest ghostel-test-imenu-goto-preserves-line-mode ()
+  "Line mode is preserved across an imenu jump.
+Mode is not switched to Emacs; `set-window-start' pins the
+window to the target's line so the next redraw's anchored
+predicate (`ghostel.el' line 5520) sees the window as
+scrolled-back."
+  (let ((emacs-mode-called nil))
+    (with-temp-buffer
+      (ghostel-test--insert-prompt "$ " "make")
+      (setq-local ghostel--input-mode 'line)
+      (cl-letf (((symbol-function 'ghostel-emacs-mode)
+                 (lambda () (setq emacs-mode-called t))))
+        (ghostel--imenu-goto "make" 1))
+      (should-not emacs-mode-called)
+      (should (eq ghostel--input-mode 'line)))))
+
+(ert-deftest ghostel-test-imenu-goto-skips-mode-switch-in-emacs ()
+  "When already in Emacs mode, goto does not re-enter Emacs mode."
+  (let ((emacs-mode-called nil))
+    (with-temp-buffer
+      (ghostel-test--insert-prompt "$ " "make")
+      (setq-local ghostel--input-mode 'emacs)
+      (cl-letf (((symbol-function 'ghostel-emacs-mode)
+                 (lambda () (setq emacs-mode-called t))))
+        (ghostel--imenu-goto "make" 1))
+      (should-not emacs-mode-called))))
+
+(ert-deftest ghostel-test-imenu-goto-skips-mode-switch-in-copy ()
+  "When already in copy mode, goto does not switch to Emacs mode."
+  (let ((emacs-mode-called nil))
+    (with-temp-buffer
+      (ghostel-test--insert-prompt "$ " "make")
+      (setq-local ghostel--input-mode 'copy)
+      (cl-letf (((symbol-function 'ghostel-emacs-mode)
+                 (lambda () (setq emacs-mode-called t))))
+        (ghostel--imenu-goto "make" 1))
+      (should-not emacs-mode-called))))
+
+;; -----------------------------------------------------------------------
 ;; Test: resize during sync output (alt screen)
 ;; -----------------------------------------------------------------------
 
@@ -12703,6 +12899,21 @@ slip past the unit tests."
     ghostel-test-compile-view-list-buffers-directory
     ghostel-test-filter-soft-wraps
     ghostel-test-prompt-navigation
+    ghostel-test-imenu-empty-buffer
+    ghostel-test-imenu-single-prompt
+    ghostel-test-imenu-skips-empty-commands
+    ghostel-test-imenu-cwd-attribution
+    ghostel-test-imenu-multi-line-command
+    ghostel-test-imenu-truncates-long-command
+    ghostel-test-imenu-stamp-cwd-hook
+    ghostel-test-imenu-survives-buffer-rebuild
+    ghostel-test-imenu-eviction-drops-oldest-cwds
+    ghostel-test-imenu-active-prompt-no-cwd-yet
+    ghostel-test-imenu-goto-lands-at-input-start
+    ghostel-test-imenu-goto-switches-to-emacs-mode
+    ghostel-test-imenu-goto-preserves-line-mode
+    ghostel-test-imenu-goto-skips-mode-switch-in-emacs
+    ghostel-test-imenu-goto-skips-mode-switch-in-copy
     ghostel-test-sync-theme
     ghostel-test-apply-palette-default-colors
     ghostel-test-apply-palette-ghostel-default-face
