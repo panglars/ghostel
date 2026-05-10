@@ -8783,6 +8783,241 @@ Never enters copy mode and never hands off to `mouse-drag-region'."
       (should (equal 5 (nth 2 mouse-event-args)))   ; row
       (should (equal 10 (nth 3 mouse-event-args)))))) ; col
 
+(ert-deftest ghostel-test-mouse-2-down-no-tracking-noop ()
+  "Middle-press with no tracking is a no-op.
+The matching release handler does the paste; the press must not
+forward bytes that the running program never asked for."
+  (let ((fake-event `(down-mouse-2 (,(selected-window) 1 (10 . 5) 0)))
+        (mouse-event-called nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'ghostel--mouse-event)
+                 (lambda (&rest _) (setq mouse-event-called t) t)))
+        (ghostel-mouse-down-2-or-noop fake-event))
+      (should-not mouse-event-called))))
+
+(ert-deftest ghostel-test-mouse-2-down-tracking-forwards ()
+  "Middle-press with active tracking forwards to libghostty."
+  (let ((fake-event `(down-mouse-2 (,(selected-window) 1 (10 . 5) 0)))
+        (mouse-event-args nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--process 'fake)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term mode) (eq mode 1000)))
+                ((symbol-function 'ghostel--mouse-event)
+                 (lambda (_term action button row col mods)
+                   (setq mouse-event-args (list action button row col mods))
+                   t))
+                ((symbol-function 'process-live-p) (lambda (_p) t))
+                ((symbol-function 'select-window) (lambda (_w) nil)))
+        (ghostel-mouse-down-2-or-noop fake-event))
+      (should (equal 0 (nth 0 mouse-event-args)))     ; action = press
+      (should (equal 3 (nth 1 mouse-event-args)))))) ; ghostty middle = 3
+
+(ert-deftest ghostel-test-mouse-2-release-no-tracking-pastes-primary ()
+  "Middle-release with no tracking pastes the primary selection."
+  (let ((fake-event `(mouse-2 (,(selected-window) 1 (10 . 5) 0)))
+        (paste-arg nil)
+        (mouse-event-called nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'semi-char)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'gui-get-primary-selection)
+                 (lambda () "hello primary"))
+                ((symbol-function 'ghostel--paste-text)
+                 (lambda (text) (setq paste-arg text)))
+                ((symbol-function 'ghostel--mouse-event)
+                 (lambda (&rest _) (setq mouse-event-called t) t))
+                ((symbol-function 'select-window) (lambda (_w) nil)))
+        (ghostel-mouse-paste-primary-or-release fake-event))
+      (should (equal "hello primary" paste-arg))
+      (should-not mouse-event-called))))
+
+(ert-deftest ghostel-test-mouse-2-release-empty-primary-no-paste ()
+  "Middle-release with an empty primary selection does not paste."
+  (let ((fake-event `(mouse-2 (,(selected-window) 1 (10 . 5) 0)))
+        (paste-called nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'semi-char)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'gui-get-primary-selection)
+                 (lambda () ""))
+                ((symbol-function 'ghostel--paste-text)
+                 (lambda (_t) (setq paste-called t)))
+                ((symbol-function 'select-window) (lambda (_w) nil)))
+        (ghostel-mouse-paste-primary-or-release fake-event))
+      (should-not paste-called))))
+
+(ert-deftest ghostel-test-mouse-2-release-tracking-forwards ()
+  "Middle-release with active tracking forwards to libghostty."
+  (let ((fake-event `(mouse-2 (,(selected-window) 1 (10 . 5) 0)))
+        (paste-called nil)
+        (mouse-event-args nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--process 'fake)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term mode) (eq mode 1000)))
+                ((symbol-function 'gui-get-primary-selection)
+                 (lambda () "should not be used"))
+                ((symbol-function 'ghostel--paste-text)
+                 (lambda (_t) (setq paste-called t)))
+                ((symbol-function 'ghostel--mouse-event)
+                 (lambda (_term action button row col mods)
+                   (setq mouse-event-args (list action button row col mods))
+                   t))
+                ((symbol-function 'process-live-p) (lambda (_p) t))
+                ((symbol-function 'select-window) (lambda (_w) nil)))
+        (ghostel-mouse-paste-primary-or-release fake-event))
+      (should-not paste-called)
+      (should (equal 1 (nth 0 mouse-event-args)))     ; action = release
+      (should (equal 3 (nth 1 mouse-event-args)))))) ; ghostty middle = 3
+
+(ert-deftest ghostel-test-mouse-2-paste-fast-exit-leaves-copy-mode ()
+  "Middle-click pasting in copy mode exits when fast-exit is on."
+  (let ((fake-event `(mouse-2 (,(selected-window) 1 (10 . 5) 0)))
+        (exit-called nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'copy)
+      (let ((ghostel-readonly-fast-exit t))
+        (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                   (lambda (_term _mode) nil))
+                  ((symbol-function 'gui-get-primary-selection)
+                   (lambda () "x"))
+                  ((symbol-function 'ghostel--paste-text) #'ignore)
+                  ((symbol-function 'ghostel-readonly-exit)
+                   (lambda () (setq exit-called t)))
+                  ((symbol-function 'select-window) (lambda (_w) nil)))
+          (ghostel-mouse-paste-primary-or-release fake-event)))
+      (should exit-called))))
+
+(ert-deftest ghostel-test-mouse-2-paste-no-fast-exit-stays-in-copy-mode ()
+  "Middle-click pasting in copy mode stays put when fast-exit is off."
+  (let ((fake-event `(mouse-2 (,(selected-window) 1 (10 . 5) 0)))
+        (exit-called nil)
+        (paste-called nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'copy)
+      (let ((ghostel-readonly-fast-exit nil))
+        (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                   (lambda (_term _mode) nil))
+                  ((symbol-function 'gui-get-primary-selection)
+                   (lambda () "x"))
+                  ((symbol-function 'ghostel--paste-text)
+                   (lambda (_t) (setq paste-called t)))
+                  ((symbol-function 'ghostel-readonly-exit)
+                   (lambda () (setq exit-called t)))
+                  ((symbol-function 'select-window) (lambda (_w) nil)))
+          (ghostel-mouse-paste-primary-or-release fake-event)))
+      (should-not exit-called)
+      (should paste-called))))
+
+(ert-deftest ghostel-test-mouse-2-release-selects-clicks-window ()
+  "Middle-release retargets the click's window before pasting.
+Without this, a middle-click in an unfocused ghostel window would
+read `ghostel--input-mode' / `ghostel--process' from whatever
+buffer happened to be current and paste into the wrong terminal."
+  (let* ((target-window 'fake-window)
+         (fake-event `(mouse-2 (,target-window 1 (10 . 5) 0)))
+         (selected-arg nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'semi-char)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'gui-get-primary-selection)
+                 (lambda () "x"))
+                ((symbol-function 'ghostel--paste-text) #'ignore)
+                ((symbol-function 'select-window)
+                 (lambda (w) (setq selected-arg w))))
+        (ghostel-mouse-paste-primary-or-release fake-event))
+      (should (eq target-window selected-arg)))))
+
+(ert-deftest ghostel-test-readonly-RET-on-link-opens-link ()
+  "RET on a hyperlink opens the link instead of exiting copy mode."
+  (let ((open-called nil)
+        (exit-called nil)
+        (send-called nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'copy)
+      (cl-letf (((symbol-function 'ghostel--uri-at-pos)
+                 (lambda (_p) "https://example.com"))
+                ((symbol-function 'ghostel-open-link-at-point)
+                 (lambda () (setq open-called t)))
+                ((symbol-function 'ghostel-readonly-exit)
+                 (lambda () (setq exit-called t)))
+                ((symbol-function 'ghostel--send-encoded)
+                 (lambda (&rest _) (setq send-called t))))
+        (ghostel-readonly-RET-or-exit-and-send))
+      (should open-called)
+      (should-not exit-called)
+      (should-not send-called))))
+
+(ert-deftest ghostel-test-readonly-RET-off-link-exits-and-sends ()
+  "RET off a hyperlink exits read-only mode and sends a CR."
+  (let ((open-called nil)
+        (exit-called nil)
+        (send-args nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'copy)
+      (setq-local ghostel--pre-readonly-mode 'semi-char)
+      (cl-letf (((symbol-function 'ghostel--uri-at-pos)
+                 (lambda (_p) nil))
+                ((symbol-function 'ghostel-open-link-at-point)
+                 (lambda () (setq open-called t)))
+                ((symbol-function 'ghostel-readonly-exit)
+                 (lambda () (setq exit-called t)))
+                ((symbol-function 'ghostel--send-encoded)
+                 (lambda (key mods &rest _)
+                   (setq send-args (list key mods)))))
+        (ghostel-readonly-RET-or-exit-and-send))
+      (should-not open-called)
+      (should exit-called)
+      (should (equal '("return" "") send-args)))))
+
+(ert-deftest ghostel-test-readonly-RET-no-send-when-returning-to-emacs-mode ()
+  "RET in copy mode returning to Emacs mode exits but does not send a CR.
+Emacs mode is read-only too — sending RET would do nothing useful."
+  (let ((exit-called nil)
+        (send-called nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'copy)
+      (setq-local ghostel--pre-readonly-mode 'emacs)
+      (cl-letf (((symbol-function 'ghostel--uri-at-pos)
+                 (lambda (_p) nil))
+                ((symbol-function 'ghostel-readonly-exit)
+                 (lambda () (setq exit-called t)))
+                ((symbol-function 'ghostel--send-encoded)
+                 (lambda (&rest _) (setq send-called t))))
+        (ghostel-readonly-RET-or-exit-and-send))
+      (should exit-called)
+      (should-not send-called))))
+
+(ert-deftest ghostel-test-readonly-RET-bound-only-with-fast-exit ()
+  "RET hits `ghostel-readonly-RET-or-exit-and-send' only when fast-exit is on.
+With fast-exit off the parent map's `ghostel-open-link-at-point'
+binding wins."
+  (should (eq #'ghostel-readonly-RET-or-exit-and-send
+              (lookup-key ghostel-readonly-fast-exit-mode-map (kbd "RET"))))
+  (should (eq #'ghostel-readonly-RET-or-exit-and-send
+              (lookup-key ghostel-readonly-fast-exit-mode-map (kbd "<return>"))))
+  (should (eq #'ghostel-open-link-at-point
+              (lookup-key ghostel-readonly-mode-map (kbd "RET"))))
+  (should (eq #'ghostel-open-link-at-point
+              (lookup-key ghostel-readonly-mode-map (kbd "<return>")))))
+
 (ert-deftest ghostel-test-scroll-intercept-unselected-window ()
   "Wheel events on an unselected ghostel window must not loop.
 

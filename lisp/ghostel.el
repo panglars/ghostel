@@ -1448,8 +1448,8 @@ Input modes (`ghostel-semi-char-mode-map', `ghostel-char-mode-map',
   "<down-mouse-1>"   #'ghostel-mouse-press-or-copy-mode
   "<mouse-1>"        #'ghostel-mouse-release-or-set-point
   "<drag-mouse-1>"   #'ghostel-mouse-drag-or-set-region
-  "<down-mouse-2>"   #'ghostel--mouse-press
-  "<mouse-2>"        #'ghostel--mouse-release
+  "<down-mouse-2>"   #'ghostel-mouse-down-2-or-noop
+  "<mouse-2>"        #'ghostel-mouse-paste-primary-or-release
   "<down-mouse-3>"   #'ghostel--mouse-press
   "<mouse-3>"        #'ghostel--mouse-release
   "<drag-mouse-2>"   #'ghostel--mouse-drag
@@ -1555,12 +1555,16 @@ See `ghostel-readonly-fast-exit'."
   :parent ghostel-readonly-mode-map
   ;; Normal letter keys exit and send the key to the terminal.
   "<remap> <self-insert-command>" #'ghostel-readonly-exit-and-send
+  ;; RET / <return> follow self-insert: open link at point if there
+  ;; is one, otherwise exit and send a CR to the terminal.  Without
+  ;; fast-exit, the parent map's `ghostel-open-link-at-point' wins.
+  "RET"                           #'ghostel-readonly-RET-or-exit-and-send
+  "<return>"                      #'ghostel-readonly-RET-or-exit-and-send
+  "C-c M-l"                       #'ghostel-readonly-exit-and-clear
   "q"                             #'ghostel-readonly-exit
+  "C-c C-e"                       #'ghostel-readonly-exit
   "C-c C-t"                       #'ghostel-readonly-exit
-  "C-g"                           #'ghostel-readonly-exit
-  ;; C-c C-l overrides the parent's `ghostel-line-mode' binding so
-  ;; clearing scrollback from inside read-only mode also exits cleanly.
-  "C-c C-l"                       #'ghostel-readonly-exit-and-clear)
+  "C-g"                           #'ghostel-readonly-exit)
 
 ;; Char mode must override minor-mode keymaps.  Without this, a user
 ;; config that binds, say, \\`C-c' as a prefix in a global minor mode
@@ -2197,6 +2201,36 @@ intercept keeps `mouse-set-region' from re-establishing the region."
       (ghostel--mouse-drag event)
     (mouse-set-region event)))
 
+(defun ghostel-mouse-down-2-or-noop (event)
+  "Forward EVENT to the terminal when a mouse-tracking mode is on.
+Otherwise no-op so the matching release handler can paste the
+primary selection without a stray press byte being sent first."
+  (interactive "e")
+  (when (ghostel--mouse-tracking-active-p)
+    (ghostel--mouse-press event)))
+
+(defun ghostel-mouse-paste-primary-or-release (event)
+  "Forward EVENT to the terminal, or paste the primary selection.
+Selects the click's window first so a middle-click into an
+unfocused ghostel window pastes into that terminal, not whichever
+buffer happened to be current.  With a DEC mouse-tracking mode
+active, behaves like `ghostel--mouse-release'.  Otherwise pastes
+the X primary selection at the live cursor via `ghostel--paste-text',
+which uses bracketed paste when the terminal has DEC 2004 enabled.
+When in copy or Emacs mode and `ghostel-readonly-fast-exit' is
+non-nil, exits to the prior input mode first so the paste lands at
+the prompt."
+  (interactive "e")
+  (select-window (posn-window (event-start event)))
+  (if (ghostel--mouse-tracking-active-p)
+      (ghostel--mouse-release event)
+    (let ((text (gui-get-primary-selection)))
+      (when (and text (not (string-empty-p text)))
+        (when (and (memq ghostel--input-mode '(copy emacs))
+                   ghostel-readonly-fast-exit)
+          (ghostel-readonly-exit))
+        (ghostel--paste-text text)))))
+
 
 ;;; Input modes — state helpers
 
@@ -2472,6 +2506,20 @@ accepts terminal input (semi-char or char)."
     (ghostel-readonly-exit)
     (when (and ghostel--term (memq target '(semi-char char)))
       (ghostel--self-insert))))
+
+(defun ghostel-readonly-RET-or-exit-and-send ()
+  "Open the link at point, or exit read-only mode and send RET.
+Bound to RET / `<return>' in `ghostel-readonly-fast-exit-mode-map'
+so RET behaves like other input keys when fast exit is on: a
+press at a hyperlink still opens the link, while a press anywhere
+else exits the read-only mode and forwards a CR to the terminal."
+  (interactive)
+  (if (ghostel--uri-at-pos (point))
+      (ghostel-open-link-at-point)
+    (let ((target (or ghostel--pre-readonly-mode 'semi-char)))
+      (ghostel-readonly-exit)
+      (when (and ghostel--term (memq target '(semi-char char)))
+        (ghostel--send-encoded "return" "")))))
 
 (defun ghostel--filter-soft-wraps (text)
   "Remove newlines from TEXT that were inserted by soft line wrapping.
