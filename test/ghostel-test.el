@@ -9163,10 +9163,11 @@ redraw and produce visible flicker, so point is left alone."
         (kill-local-variable 'pre-command-hook)))))
 
 (ert-deftest ghostel-test-mouse-1-press-no-tracking-semi-char ()
-  "Left-press in semi-char with no tracking enters copy mode and drags.
-Hands EVENT off to `mouse-drag-region' after switching to copy mode so
-Emacs's standard click-set-point and drag-to-select work, with the
-buffer frozen for selection."
+  "Left-press in semi-char with no tracking does NOT enter copy mode.
+The press only hands EVENT off to `mouse-drag-region' so that pure
+clicks merely focus the window and set point.  Copy mode is entered
+later by `ghostel-mouse-drag-or-set-region' if the press grows into
+a drag, so streaming output cannot clobber the resulting region."
   (let ((fake-event `(down-mouse-1 (,(selected-window) 1 (10 . 5) 0)))
         (copy-mode-called nil)
         (drag-region-arg nil))
@@ -9181,7 +9182,7 @@ buffer frozen for selection."
                  (lambda (event) (setq drag-region-arg event)))
                 ((symbol-function 'select-window) (lambda (_w) nil)))
         (ghostel-mouse-press-or-copy-mode fake-event))
-      (should copy-mode-called)
+      (should-not copy-mode-called)
       (should (equal fake-event drag-region-arg)))))
 
 (ert-deftest ghostel-test-mouse-1-press-no-tracking-copy-mode ()
@@ -9268,23 +9269,170 @@ mode or otherwise interfere."
   "Drag-end with no tracking hands off to `mouse-set-region'.
 This is the bug guard: without it, `mouse-drag-track's exit hook
 deactivates the mark, our intercept blocks `mouse-set-region', and
-the user-visible region disappears on release."
+the user-visible region disappears on release.  The buffer here is
+not in semi-char mode, so copy mode must not be entered."
   (let ((fake-event `(drag-mouse-1
                       (,(selected-window) 1 (5 . 2) 0)
                       (,(selected-window) 7 (10 . 4) 0)))
         (set-region-arg nil)
+        (copy-mode-called nil)
         (mouse-event-called nil))
     (with-temp-buffer
       (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'emacs)
       (cl-letf (((symbol-function 'ghostel--mode-enabled)
                  (lambda (_term _mode) nil))
                 ((symbol-function 'mouse-set-region)
                  (lambda (event) (setq set-region-arg event)))
+                ((symbol-function 'ghostel-copy-mode)
+                 (lambda () (setq copy-mode-called t)))
                 ((symbol-function 'ghostel--mouse-event)
                  (lambda (&rest _) (setq mouse-event-called t) t)))
         (ghostel-mouse-drag-or-set-region fake-event))
       (should (equal fake-event set-region-arg))
+      (should-not copy-mode-called)
       (should-not mouse-event-called))))
+
+(ert-deftest ghostel-test-mouse-1-drag-no-tracking-semi-char-enters-copy-mode ()
+  "Drag-end in semi-char with no tracking enters copy mode after region.
+The press handler no longer freezes the buffer, so freezing happens
+here once the region is established — terminal output that arrives
+after release would otherwise overwrite the highlighted cells.
+Exercises the `copy' target of `ghostel-mouse-drag-input-mode'."
+  (let ((fake-event `(drag-mouse-1
+                      (,(selected-window) 1 (5 . 2) 0)
+                      (,(selected-window) 7 (10 . 4) 0)))
+        (ghostel-mouse-drag-input-mode 'copy)
+        (set-region-arg nil)
+        (copy-mode-called nil)
+        (emacs-mode-called nil)
+        (call-order nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'semi-char)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'mouse-set-region)
+                 (lambda (event)
+                   (setq set-region-arg event)
+                   (push 'set-region call-order)))
+                ((symbol-function 'ghostel-copy-mode)
+                 (lambda ()
+                   (setq copy-mode-called t)
+                   (push 'copy-mode call-order)))
+                ((symbol-function 'ghostel-emacs-mode)
+                 (lambda () (setq emacs-mode-called t))))
+        (ghostel-mouse-drag-or-set-region fake-event))
+      (should (equal fake-event set-region-arg))
+      (should copy-mode-called)
+      (should-not emacs-mode-called)
+      ;; Region must be set before copy mode freezes the buffer.
+      (should (equal '(set-region copy-mode) (nreverse call-order))))))
+
+(ert-deftest ghostel-test-mouse-1-drag-no-tracking-semi-char-emacs-target ()
+  "Drag-end in semi-char with `ghostel-mouse-drag-input-mode' = `emacs'.
+Enters Emacs mode (not copy) so the user keeps streaming output but
+gains a read-only buffer that preserves the selection."
+  (let ((fake-event `(drag-mouse-1
+                      (,(selected-window) 1 (5 . 2) 0)
+                      (,(selected-window) 7 (10 . 4) 0)))
+        (ghostel-mouse-drag-input-mode 'emacs)
+        (set-region-arg nil)
+        (copy-mode-called nil)
+        (emacs-mode-called nil)
+        (call-order nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'semi-char)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'mouse-set-region)
+                 (lambda (event)
+                   (setq set-region-arg event)
+                   (push 'set-region call-order)))
+                ((symbol-function 'ghostel-copy-mode)
+                 (lambda () (setq copy-mode-called t)))
+                ((symbol-function 'ghostel-emacs-mode)
+                 (lambda ()
+                   (setq emacs-mode-called t)
+                   (push 'emacs-mode call-order))))
+        (ghostel-mouse-drag-or-set-region fake-event))
+      (should (equal fake-event set-region-arg))
+      (should emacs-mode-called)
+      (should-not copy-mode-called)
+      (should (equal '(set-region emacs-mode) (nreverse call-order))))))
+
+(ert-deftest ghostel-test-mouse-1-drag-no-tracking-semi-char-nil-target-stays ()
+  "Drag-end in semi-char with `ghostel-mouse-drag-input-mode' = nil.
+Stays in semi-char so the selection is best-effort and will be lost
+on the next redraw - neither copy nor Emacs mode is entered."
+  (let ((fake-event `(drag-mouse-1
+                      (,(selected-window) 1 (5 . 2) 0)
+                      (,(selected-window) 7 (10 . 4) 0)))
+        (ghostel-mouse-drag-input-mode nil)
+        (set-region-arg nil)
+        (copy-mode-called nil)
+        (emacs-mode-called nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'semi-char)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'mouse-set-region)
+                 (lambda (event) (setq set-region-arg event)))
+                ((symbol-function 'ghostel-copy-mode)
+                 (lambda () (setq copy-mode-called t)))
+                ((symbol-function 'ghostel-emacs-mode)
+                 (lambda () (setq emacs-mode-called t))))
+        (ghostel-mouse-drag-or-set-region fake-event))
+      (should (equal fake-event set-region-arg))
+      (should-not copy-mode-called)
+      (should-not emacs-mode-called))))
+
+(ert-deftest ghostel-test-mouse-1-drag-no-tracking-copy-mode-no-toggle ()
+  "Drag-end in copy mode does not call `ghostel-copy-mode' again.
+Calling `ghostel-copy-mode' from within copy mode would toggle it
+off, dropping the user back into semi-char and unfreezing the
+buffer right after they finished selecting."
+  (let ((fake-event `(drag-mouse-1
+                      (,(selected-window) 1 (5 . 2) 0)
+                      (,(selected-window) 7 (10 . 4) 0)))
+        (set-region-arg nil)
+        (copy-mode-called nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'copy)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'mouse-set-region)
+                 (lambda (event) (setq set-region-arg event)))
+                ((symbol-function 'ghostel-copy-mode)
+                 (lambda () (setq copy-mode-called t))))
+        (ghostel-mouse-drag-or-set-region fake-event))
+      (should (equal fake-event set-region-arg))
+      (should-not copy-mode-called))))
+
+(ert-deftest ghostel-test-mouse-1-drag-no-tracking-line-mode-no-copy-mode ()
+  "Drag-end in line mode does not enter copy mode.
+Line mode keeps its own buffer state and must not be flipped into
+copy mode behind the user's back."
+  (let ((fake-event `(drag-mouse-1
+                      (,(selected-window) 1 (5 . 2) 0)
+                      (,(selected-window) 7 (10 . 4) 0)))
+        (set-region-arg nil)
+        (copy-mode-called nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'line)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'mouse-set-region)
+                 (lambda (event) (setq set-region-arg event)))
+                ((symbol-function 'ghostel-copy-mode)
+                 (lambda () (setq copy-mode-called t))))
+        (ghostel-mouse-drag-or-set-region fake-event))
+      (should (equal fake-event set-region-arg))
+      (should-not copy-mode-called))))
 
 (ert-deftest ghostel-test-mouse-1-drag-tracking-forwards ()
   "Drag-end with active tracking forwards via `ghostel--mouse-drag'."

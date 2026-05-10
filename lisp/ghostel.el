@@ -675,6 +675,24 @@ Customize the faces `ghostel-fake-cursor' and
 `ghostel-fake-cursor-box' to tune the appearance."
   :type 'boolean)
 
+(defcustom ghostel-mouse-drag-input-mode 'copy
+  "Input mode to switch to after a left-button drag selects a region.
+
+- `copy' (default): enter `ghostel-copy-mode'.  Pauses redraws -
+  the selection is stable and the buffer is read-only.
+- `emacs': enter `ghostel-emacs-mode'.  Terminal output keeps
+  streaming; the buffer is read-only.  Pick this when you do not
+  want the terminal to pause for a selection.
+- nil: stay in semi-char.  Best-effort - the selection could get
+  clobbered by the next redraw, and `M-w' is not bound here.
+
+Has no effect when a DEC mouse-tracking mode (1000/1002/1003) is
+active (the press is forwarded to the program) or when the buffer
+is not in semi-char-mode when the drag completes."
+  :type '(choice (const :tag "Copy mode (default)" copy)
+                 (const :tag "Emacs mode"          emacs)
+                 (const :tag "Do not switch"       nil)))
+
 (defcustom ghostel-scroll-on-input t
   "Automatically scroll to the bottom when typing in the terminal.
 When non-nil, any character typed while the viewport is scrolled
@@ -2197,20 +2215,16 @@ to consume mouse input."
 When a DEC mouse-tracking mode (1000/1002/1003) is enabled, behaves
 like `ghostel--mouse-press' and forwards the press to the running
 program.  Otherwise hands EVENT off to `mouse-drag-region' so Emacs's
-standard click-to-set-point and drag-to-select work; if the buffer is
-in semi-char mode (where typing normally goes to the terminal) it
-also switches to `ghostel-copy-mode' first so the buffer is frozen
-and read-only for the duration of the selection."
+standard click-to-set-point and drag-to-select work.  Copy mode is
+not entered here - a pure click should only focus the window and
+move point.  When the press grows into a drag,
+`ghostel-mouse-drag-or-set-region' enters copy mode after the region
+is set so subsequent terminal output cannot clobber the selection."
   (interactive "e")
   (select-window (posn-window (event-start event)))
-  (cond
-   ((ghostel--mouse-tracking-active-p)
-    (ghostel--mouse-press event))
-   ((eq ghostel--input-mode 'semi-char)
-    (ghostel-copy-mode)
-    (mouse-drag-region event))
-   (t
-    (mouse-drag-region event))))
+  (if (ghostel--mouse-tracking-active-p)
+      (ghostel--mouse-press event)
+    (mouse-drag-region event)))
 
 (defun ghostel-mouse-release-or-set-point (event)
   "Forward EVENT to the terminal, or hand off to `mouse-set-point'.
@@ -2228,11 +2242,17 @@ Companion to `ghostel-mouse-press-or-copy-mode' for the left-button
 drag event.  With tracking off, defers to Emacs's standard drag
 handler so the selection survives release; without this,
 `mouse-drag-track's exit hook deactivates the mark and our
-intercept keeps `mouse-set-region' from re-establishing the region."
+intercept keeps `mouse-set-region' from re-establishing the region.
+When the buffer is in semi-char mode, switches input mode once the
+region is set to mode configured in `ghostel-mouse-drag-input-mode'."
   (interactive "e")
   (if (ghostel--mouse-tracking-active-p)
       (ghostel--mouse-drag event)
-    (mouse-set-region event)))
+    (mouse-set-region event)
+    (when (eq ghostel--input-mode 'semi-char)
+      (pcase ghostel-mouse-drag-input-mode
+        ('copy  (ghostel-copy-mode))
+        ('emacs (ghostel-emacs-mode))))))
 
 (defun ghostel-mouse-down-2-or-noop (event)
   "Forward EVENT to the terminal when a mouse-tracking mode is on.

@@ -21,6 +21,16 @@ All notable changes to this project will be documented in this file.
   [#244](https://github.com/dakra/ghostel/issues/244).
 
 ### Added
+- Left-clicking a ghostel window no longer auto-enters copy mode on
+  press — a bare click only focuses the window and sets point,
+  matching standard Emacs behavior.  A drag still switches input
+  mode on release so streaming output cannot clobber the selection;
+  the target is picked by the new `ghostel-mouse-drag-input-mode`
+  (default `copy`).  Choices are `copy` (freezes redraws; selection
+  is rock-solid), `emacs` (terminal keeps streaming; buffer becomes
+  read-only), and `nil` (stay in semi-char; scrollback selections
+  still survive, selections over live-redrawn rows can be lost).
+  Closes [#257](https://github.com/dakra/ghostel/issues/257).
 - `ghostel-detect-password-prompts` — defcustom (default t) gating
   the entire detector.  ghostel-compile binds it to nil
   buffer-locally because compile buffers run with `stty -echo' to
