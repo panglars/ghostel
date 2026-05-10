@@ -7721,6 +7721,248 @@ hand nil to the native module."
         (kill-buffer buf)))))
 
 ;; -----------------------------------------------------------------------
+;; Test: read-only-mode hint cursor (fake cursor)
+;; -----------------------------------------------------------------------
+
+(ert-deftest ghostel-test-fake-cursor-style-resolution ()
+  "`ghostel--fake-cursor-style' maps `cursor-in-non-selected-windows'."
+  (with-temp-buffer
+    (let ((cursor-in-non-selected-windows nil))
+      (should (null (ghostel--fake-cursor-style))))
+    (let ((cursor-in-non-selected-windows 'hollow))
+      (should (eq 'hollow (ghostel--fake-cursor-style))))
+    (let ((cursor-in-non-selected-windows 'box))
+      (should (eq 'box (ghostel--fake-cursor-style))))
+    (let ((cursor-in-non-selected-windows '(box . 4)))
+      (should (eq 'box (ghostel--fake-cursor-style))))
+    ;; bar / hbar fall back to hollow
+    (let ((cursor-in-non-selected-windows 'bar))
+      (should (eq 'hollow (ghostel--fake-cursor-style))))
+    (let ((cursor-in-non-selected-windows '(bar . 2)))
+      (should (eq 'hollow (ghostel--fake-cursor-style))))
+    (let ((cursor-in-non-selected-windows 'hbar))
+      (should (eq 'hollow (ghostel--fake-cursor-style))))
+    ;; t with a saved box cursor-type → hollow
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((cursor-in-non-selected-windows t))
+      (should (eq 'hollow (ghostel--fake-cursor-style))))
+    ;; t with no saved cursor-type → nil (terminal hid the cursor)
+    (setq-local ghostel--saved-cursor-type nil)
+    (let ((cursor-in-non-selected-windows t))
+      (should (null (ghostel--fake-cursor-style))))))
+
+(ert-deftest ghostel-test-fake-cursor-overlay-when-point-off-cursor ()
+  "Overlay appears at the live cursor position when point is elsewhere."
+  (with-temp-buffer
+    (insert "abcdef\nghijkl")
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--input-mode 'copy)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor t)
+          (cursor-in-non-selected-windows 'hollow))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () 5)))
+        (goto-char 1)
+        (ghostel--fake-cursor-update)
+        (should ghostel--fake-cursor-overlay)
+        (should (= 5 (overlay-start ghostel--fake-cursor-overlay)))
+        (should (= 6 (overlay-end ghostel--fake-cursor-overlay)))
+        (should (eq 'ghostel-fake-cursor
+                    (overlay-get ghostel--fake-cursor-overlay 'face)))))))
+
+(ert-deftest ghostel-test-fake-cursor-cleared-when-point-coincides ()
+  "Overlay is removed when point lands on the live cursor position."
+  (with-temp-buffer
+    (insert "abcdef\nghijkl")
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--input-mode 'copy)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor t)
+          (cursor-in-non-selected-windows 'hollow))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () 5)))
+        (goto-char 1)
+        (ghostel--fake-cursor-update)
+        (should ghostel--fake-cursor-overlay)
+        (goto-char 5)
+        (ghostel--fake-cursor-update)
+        (should-not ghostel--fake-cursor-overlay)))))
+
+(ert-deftest ghostel-test-fake-cursor-disabled-by-defcustom ()
+  "No overlay is created when `ghostel-readonly-fake-cursor' is nil."
+  (with-temp-buffer
+    (insert "abcdef")
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--input-mode 'copy)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor nil)
+          (cursor-in-non-selected-windows 'hollow))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () 5)))
+        (goto-char 1)
+        (ghostel--fake-cursor-update)
+        (should-not ghostel--fake-cursor-overlay)))))
+
+(ert-deftest ghostel-test-fake-cursor-disabled-by-cinsw ()
+  "No overlay when `cursor-in-non-selected-windows' resolves to nil."
+  (with-temp-buffer
+    (insert "abcdef")
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--input-mode 'copy)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor t)
+          (cursor-in-non-selected-windows nil))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () 5)))
+        (goto-char 1)
+        (ghostel--fake-cursor-update)
+        (should-not ghostel--fake-cursor-overlay)))))
+
+(ert-deftest ghostel-test-fake-cursor-not-in-semi-char ()
+  "No overlay outside copy / Emacs mode."
+  (with-temp-buffer
+    (insert "abcdef")
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor t)
+          (cursor-in-non-selected-windows 'hollow))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () 5)))
+        (dolist (mode '(semi-char char line))
+          (setq-local ghostel--input-mode mode)
+          (goto-char 1)
+          (ghostel--fake-cursor-update)
+          (should-not ghostel--fake-cursor-overlay))))))
+
+(ert-deftest ghostel-test-fake-cursor-box-style-uses-box-face ()
+  "`box' resolution paints with the solid face."
+  (with-temp-buffer
+    (insert "abcdef")
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--input-mode 'copy)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor t)
+          (cursor-in-non-selected-windows 'box))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () 5)))
+        (goto-char 1)
+        (ghostel--fake-cursor-update)
+        (should (eq 'ghostel-fake-cursor-box
+                    (overlay-get ghostel--fake-cursor-overlay 'face)))))))
+
+(ert-deftest ghostel-test-fake-cursor-eol-uses-after-string ()
+  "At end-of-line / end-of-buffer, the overlay uses an after-string."
+  (with-temp-buffer
+    (insert "abc")                    ; eob = 4
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--input-mode 'copy)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor t)
+          (cursor-in-non-selected-windows 'hollow))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () 4)))
+        (goto-char 1)
+        (ghostel--fake-cursor-update)
+        (should ghostel--fake-cursor-overlay)
+        (let ((after (overlay-get ghostel--fake-cursor-overlay 'after-string)))
+          (should (stringp after))
+          (should (eq 'ghostel-fake-cursor
+                      (get-text-property 0 'face after))))
+        (should (null (overlay-get ghostel--fake-cursor-overlay 'face)))))))
+
+(ert-deftest ghostel-test-fake-cursor-cleared-on-leave-readonly ()
+  "`ghostel--leave-readonly-state' clears the overlay and the hook."
+  (with-temp-buffer
+    (insert "abcdef")
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--input-mode 'copy)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor t)
+          (cursor-in-non-selected-windows 'hollow))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () 5)))
+        (goto-char 1)
+        (add-hook 'pre-redisplay-functions #'ghostel--fake-cursor-update nil t)
+        (ghostel--fake-cursor-update)
+        (should ghostel--fake-cursor-overlay)
+        (should (memq #'ghostel--fake-cursor-update pre-redisplay-functions))
+        (ghostel--leave-readonly-state)
+        (should-not ghostel--fake-cursor-overlay)
+        (should-not (memq #'ghostel--fake-cursor-update pre-redisplay-functions))))))
+
+(ert-deftest ghostel-test-fake-cursor-toggles-between-eol-and-mid-line ()
+  "Same overlay flips between `face' and `after-string' as it crosses EOL."
+  (with-temp-buffer
+    (insert "abcdef\nghijkl")          ; eol of line 1 = 7
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--input-mode 'copy)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor t)
+          (cursor-in-non-selected-windows 'hollow)
+          (live-pos 3))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () live-pos)))
+        (goto-char 1)
+        ;; Mid-line: face set, no after-string.
+        (ghostel--fake-cursor-update)
+        (let ((ov ghostel--fake-cursor-overlay))
+          (should ov)
+          (should (eq 'ghostel-fake-cursor (overlay-get ov 'face)))
+          (should-not (overlay-get ov 'after-string))
+          ;; Move live cursor to EOL: same overlay flips to after-string.
+          (setq live-pos 7)
+          (ghostel--fake-cursor-update)
+          (should (eq ov ghostel--fake-cursor-overlay))
+          (should-not (overlay-get ov 'face))
+          (should (stringp (overlay-get ov 'after-string)))
+          ;; Move back to mid-line: flips back.
+          (setq live-pos 4)
+          (ghostel--fake-cursor-update)
+          (should (eq ov ghostel--fake-cursor-overlay))
+          (should (eq 'ghostel-fake-cursor (overlay-get ov 'face)))
+          (should-not (overlay-get ov 'after-string)))))))
+
+(ert-deftest ghostel-test-fake-cursor-reuses-overlay-across-positions ()
+  "Successive updates with different positions reuse one overlay."
+  (with-temp-buffer
+    (insert "abcdef")
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--input-mode 'copy)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor t)
+          (cursor-in-non-selected-windows 'hollow)
+          (live-pos 3))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () live-pos)))
+        (goto-char 1)
+        (ghostel--fake-cursor-update)
+        (let ((ov ghostel--fake-cursor-overlay))
+          (should ov)
+          (should (= 3 (overlay-start ov)))
+          (setq live-pos 5)
+          (ghostel--fake-cursor-update)
+          (should (eq ov ghostel--fake-cursor-overlay))
+          (should (= 5 (overlay-start ov))))))))
+
+(ert-deftest ghostel-test-fake-cursor-clears-when-term-nil ()
+  "Overlay is cleared when `ghostel--term' becomes nil (process exit)."
+  (with-temp-buffer
+    (insert "abcdef")
+    (setq-local ghostel--term 'fake)
+    (setq-local ghostel--input-mode 'copy)
+    (setq-local ghostel--saved-cursor-type 'box)
+    (let ((ghostel-readonly-fake-cursor t)
+          (cursor-in-non-selected-windows 'hollow))
+      (cl-letf (((symbol-function 'ghostel--cursor-buffer-pos)
+                 (lambda () 5)))
+        (goto-char 1)
+        (ghostel--fake-cursor-update)
+        (should ghostel--fake-cursor-overlay)
+        (setq-local ghostel--term nil)
+        (ghostel--fake-cursor-update)
+        (should-not ghostel--fake-cursor-overlay)))))
+
+;; -----------------------------------------------------------------------
 ;; Test: ghostel-project buffer naming
 ;; -----------------------------------------------------------------------
 
@@ -13432,6 +13674,18 @@ slip past the unit tests."
     ghostel-test-copy-mode-cursor
     ghostel-test-ignore-cursor-change
     ghostel-test-copy-mode-hl-line
+    ghostel-test-fake-cursor-style-resolution
+    ghostel-test-fake-cursor-overlay-when-point-off-cursor
+    ghostel-test-fake-cursor-cleared-when-point-coincides
+    ghostel-test-fake-cursor-disabled-by-defcustom
+    ghostel-test-fake-cursor-disabled-by-cinsw
+    ghostel-test-fake-cursor-not-in-semi-char
+    ghostel-test-fake-cursor-box-style-uses-box-face
+    ghostel-test-fake-cursor-eol-uses-after-string
+    ghostel-test-fake-cursor-cleared-on-leave-readonly
+    ghostel-test-fake-cursor-toggles-between-eol-and-mid-line
+    ghostel-test-fake-cursor-reuses-overlay-across-positions
+    ghostel-test-fake-cursor-clears-when-term-nil
     ghostel-test-project-buffer-name
     ghostel-test-project-universal-arg
     ghostel-test-reuses-identity-match-after-rename

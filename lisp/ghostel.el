@@ -653,6 +653,19 @@ and affected buffers will pick up the new value on the next mode transition."
              (when (memq ghostel--input-mode '(copy emacs))
                (use-local-map (ghostel--readonly-keymap)))))))
 
+(defcustom ghostel-readonly-fake-cursor t
+  "When non-nil, draw a hint cursor at the live terminal position.
+Active in copy and Emacs modes whenever point is somewhere other than
+the live terminal cursor - the hint shows where new output will land.
+
+The hint's shape follows `cursor-in-non-selected-windows':
+hollow and box render as their respective faces; nil hides the
+hint; t derives the shape from the saved `cursor-type' (box
+variants render as hollow); bar and hbar fall back to hollow.
+Customize the faces `ghostel-fake-cursor' and
+`ghostel-fake-cursor-box' to tune the appearance."
+  :type 'boolean)
+
 (defcustom ghostel-scroll-on-input t
   "Automatically scroll to the bottom when typing in the terminal.
 When non-nil, any character typed while the viewport is scrolled
@@ -782,6 +795,15 @@ or when the `bash-completion' package is not installed."
 (defface ghostel-color-bright-white
   '((t :inherit ansi-color-bright-white))
   "Face used to render bright white color code.")
+
+(defface ghostel-fake-cursor
+  '((t :box (:line-width (-1 . -1))))
+  "Face for the hollow hint cursor drawn in copy and Emacs modes.")
+
+(defface ghostel-fake-cursor-box
+  '((t :inherit cursor))
+  "Face for the solid hint cursor drawn for box-style cursors.
+Used when `cursor-in-non-selected-windows' resolves to box.")
 
 (defvar ghostel-color-palette
   [ghostel-color-black
@@ -2305,12 +2327,15 @@ redraw timer — that is the caller's job when freezing."
   (setq cursor-type (default-value 'cursor-type))
   (when ghostel--saved-hl-line-mode
     (hl-line-mode 1))
-  (setq buffer-read-only t))
+  (setq buffer-read-only t)
+  (add-hook 'pre-redisplay-functions #'ghostel--fake-cursor-update nil t))
 
 (defun ghostel--leave-readonly-state ()
   "Common teardown when leaving a read-only mode.
 Restores the cursor style, deactivates the mark, disables
 `hl-line-mode' again, and clears `buffer-read-only'."
+  (remove-hook 'pre-redisplay-functions #'ghostel--fake-cursor-update t)
+  (ghostel--fake-cursor-clear)
   (setq cursor-type ghostel--saved-cursor-type)
   (deactivate-mark)
   (when ghostel--saved-hl-line-mode
@@ -2322,6 +2347,70 @@ Restores the cursor style, deactivates the mark, disables
   (when ghostel--redraw-timer
     (cancel-timer ghostel--redraw-timer)
     (setq ghostel--redraw-timer nil)))
+
+(defvar-local ghostel--fake-cursor-overlay nil
+  "Overlay rendering the hint cursor in copy and Emacs modes.
+See `ghostel-readonly-fake-cursor'.")
+
+(defun ghostel--fake-cursor-style ()
+  "Resolve `cursor-in-non-selected-windows' to `hollow', `box', or nil.
+Honours the variable's full range: nil returns nil; t derives
+from `ghostel--saved-cursor-type' with box variants becoming
+hollow; hollow and box pass through; bar and hbar fall back to
+hollow."
+  (pcase cursor-in-non-selected-windows
+    ('nil nil)
+    ('t (pcase ghostel--saved-cursor-type
+          ('nil nil)
+          (_ 'hollow)))
+    ('hollow 'hollow)
+    ((or 'box `(box . ,_)) 'box)
+    (_ 'hollow)))
+
+(defun ghostel--fake-cursor-clear ()
+  "Delete the hint cursor overlay if any."
+  (when ghostel--fake-cursor-overlay
+    (delete-overlay ghostel--fake-cursor-overlay)
+    (setq ghostel--fake-cursor-overlay nil)))
+
+(defun ghostel--fake-cursor-update (&optional _window)
+  "Refresh the hint cursor overlay.
+Draws an overlay at the live terminal cursor position when in
+copy or Emacs mode, point is somewhere other than the live cursor,
+and `ghostel-readonly-fake-cursor' is non-nil with a non-nil
+resolved style.  Otherwise clears the overlay.
+
+Accepts an optional unused WINDOW argument so it can serve as a
+`pre-redisplay-functions' entry."
+  (let ((style (and ghostel-readonly-fake-cursor
+                    (memq ghostel--input-mode '(copy emacs))
+                    (ghostel--fake-cursor-style)))
+        (pos (and ghostel--term (ghostel--cursor-buffer-pos))))
+    (cond
+     ((or (null style) (null pos) (= pos (point)))
+      (ghostel--fake-cursor-clear))
+     (t
+      (let* ((face (if (eq style 'box)
+                       'ghostel-fake-cursor-box
+                     'ghostel-fake-cursor))
+             (eol (or (= pos (point-max))
+                      (= pos (save-excursion
+                               (goto-char pos)
+                               (line-end-position)))))
+             (ov (or ghostel--fake-cursor-overlay
+                     (let ((new (make-overlay 1 1 nil t nil)))
+                       (overlay-put new 'priority 100)
+                       (setq ghostel--fake-cursor-overlay new)))))
+        (cond
+         (eol
+          (move-overlay ov pos pos)
+          (overlay-put ov 'face nil)
+          (overlay-put ov 'after-string
+                       (propertize " " 'face face)))
+         (t
+          (move-overlay ov pos (1+ pos))
+          (overlay-put ov 'after-string nil)
+          (overlay-put ov 'face face))))))))
 
 
 ;;; Input mode switching commands
@@ -2436,7 +2525,8 @@ a non-read-only mode."
     (setq ghostel--input-mode mode)
     (use-local-map (ghostel--readonly-keymap))
     (setq ghostel--mode-line-tag label)
-    (ghostel--mode-line-refresh)))
+    (ghostel--mode-line-refresh)
+    (ghostel--fake-cursor-update)))
 
 (defun ghostel-emacs-mode ()
   "Switch to Emacs mode — read-only buffer with the terminal still running.
@@ -2604,8 +2694,8 @@ renderer (chars typed via the PTY in a previous mode).  Cleared to
 many backspaces to erase them — keeps a subsequent send from
 duplicating the prefix when the shell echoes our line back.")
 
-(defun ghostel--line-mode-cursor-buffer-pos ()
-  "Return the buffer position of the terminal cursor, or nil.
+(defun ghostel--cursor-buffer-pos ()
+  "Return the buffer position of the live terminal cursor, or nil.
 Maps libghostty's viewport (COL . ROW) to a buffer position: walks
 ROW lines down from `ghostel--viewport-start' (the renderer
 guarantees one buffer line per viewport row), then advances by
@@ -2647,7 +2737,7 @@ return the position right after the last contiguous
 `ghostel-prompt' char on that row; otherwise return the cursor
 position itself.  Returns nil when neither path can locate a
 position (no cursor and no prompt prop)."
-  (let ((cursor-pos (ghostel--line-mode-cursor-buffer-pos)))
+  (let ((cursor-pos (ghostel--cursor-buffer-pos)))
     (cond
      (cursor-pos
       (let* ((row-start (save-excursion
@@ -4928,6 +5018,8 @@ PROCESS is the shell process, EVENT describes the state change."
                 ghostel--plain-link-detection-begin nil
                 ghostel--plain-link-detection-end nil))
         (ghostel--spinner-stop)
+        (remove-hook 'pre-redisplay-functions #'ghostel--fake-cursor-update t)
+        (ghostel--fake-cursor-clear)
         (run-hook-with-args 'ghostel-exit-functions buf event)
         (if ghostel-kill-buffer-on-exit
             (kill-buffer buf)
