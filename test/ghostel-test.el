@@ -11202,26 +11202,26 @@ Otherwise the window stays where the user navigated."
 ;; Test: line mode
 ;; -----------------------------------------------------------------------
 
-(ert-deftest ghostel-test-line-mode-find-prompt-end ()
-  "`ghostel--line-mode-find-prompt-end' walks back from `point-max'.
+(ert-deftest ghostel-test-input-start-point-walks-back-without-cursor ()
+  "`ghostel-input-start-point' walks back from `point-max'.
 Exercises the fallback path used when no live terminal cursor is
 available (unit tests, native module not loaded)."
   (with-temp-buffer
     ;; No prompt property anywhere → nil
     (insert "plain text")
-    (should-not (ghostel--line-mode-find-prompt-end))
+    (should-not (ghostel-input-start-point))
     ;; With prompt property
     (erase-buffer)
     (insert (propertize "$ " 'ghostel-prompt t))
     (insert "")  ; cursor right after prompt
-    (should (= (ghostel--line-mode-find-prompt-end) 3))
+    (should (= (ghostel-input-start-point) 3))
     ;; With prompt property followed by user-typed content
     (erase-buffer)
     (insert (propertize "$ " 'ghostel-prompt t))
     (insert "ls -la")
-    (should (= (ghostel--line-mode-find-prompt-end) 3))))
+    (should (= (ghostel-input-start-point) 3))))
 
-(ert-deftest ghostel-test-line-mode-find-prompt-end-uses-cursor ()
+(ert-deftest ghostel-test-input-start-point-uses-cursor-without-prop ()
   "When a terminal cursor is available, it anchors the input boundary.
 Mimics a python3-style REPL: no `ghostel-prompt' anywhere, but the
 cursor sits at the end of the `>>> ' prompt the REPL printed."
@@ -11232,12 +11232,12 @@ cursor sits at the end of the `>>> ' prompt the REPL printed."
           (setq ghostel--term 'fake)
           (setq ghostel--term-rows 1)
           (setq ghostel--cursor-char-pos 5)
-          ;; Cursor at char-pos 5 → `ghostel--line-mode-find-prompt-end'
+          ;; Cursor at char-pos 5 → `ghostel-input-start-point'
           ;; returns 5, pointing right after `>>> '.
-          (should (= (ghostel--line-mode-find-prompt-end) 5)))
+          (should (= (ghostel-input-start-point) 5)))
       (kill-buffer buf))))
 
-(ert-deftest ghostel-test-line-mode-find-prompt-end-prefers-cursor-over-stale-prompt ()
+(ert-deftest ghostel-test-input-start-point-prefers-cursor-over-stale-prompt ()
   "A stale `ghostel-prompt' above the cursor row is ignored.
 When bash printed an OSC-133 prompt and then the user launched
 python3 (which doesn't speak OSC 133), the only `ghostel-prompt'
@@ -11255,14 +11255,14 @@ onto the bash prompt."
           (setq ghostel--term 'fake)
           (setq ghostel--term-rows 3)
           (setq ghostel--cursor-char-pos (1- (point-max)))
-          (let ((pos (ghostel--line-mode-find-prompt-end)))
+          (let ((pos (ghostel-input-start-point)))
             (should pos)
             (should (string= ">>> "
                              (buffer-substring-no-properties
                               (- pos 4) pos)))))
       (kill-buffer buf))))
 
-(ert-deftest ghostel-test-line-mode-find-prompt-end-osc133-on-cursor-row ()
+(ert-deftest ghostel-test-input-start-point-osc133-on-cursor-row ()
   "When `ghostel-prompt' covers the cursor row's prefix, use its end.
 This is the canonical bash-with-shell-integration path: `$ '
 carries `ghostel-prompt', cursor sits right after it (or after
@@ -11276,7 +11276,86 @@ input already typed at the prompt)."
           (setq ghostel--term-rows 1)
           (let ((ghostel--cursor-char-pos 8))
             ;; Prompt prefix ends at position 3 (after "$ ").
-            (should (= (ghostel--line-mode-find-prompt-end) 3))))
+            (should (= (ghostel-input-start-point) 3))))
+      (kill-buffer buf))))
+
+;; -----------------------------------------------------------------------
+;; Test: public input-region API
+;; -----------------------------------------------------------------------
+
+(defmacro ghostel-test--with-input-fixture (prompt input &rest body)
+  "Set up a mock terminal buffer with PROMPT (carrying `ghostel-prompt')
+followed by INPUT, with `ghostel--cursor-char-pos' positioned at the
+end of INPUT.  Runs BODY in the buffer.
+
+Mocks the terminal handle and viewport so the new public input-region
+helpers can derive prompt boundaries and viewport rows without a real
+native module."
+  (declare (indent 2))
+  `(let ((buf (generate-new-buffer " *ghostel-test-input*")))
+     (unwind-protect
+         (with-current-buffer buf
+           (ghostel-mode)
+           (let ((inhibit-read-only t))
+             (insert (propertize ,prompt 'ghostel-prompt t))
+             (insert ,input))
+           (setq ghostel--term 'fake)
+           (setq ghostel--term-rows 1)
+           (setq ghostel--cursor-char-pos (point))
+           (setq ghostel--cursor-pos (cons (current-column) 0))
+           ,@body)
+       (kill-buffer buf))))
+
+(ert-deftest ghostel-test-input-start-point-returns-after-prompt-prop ()
+  "`ghostel-input-start-point' returns position right after the prompt prefix."
+  (ghostel-test--with-input-fixture "$ " "ls -la"
+    (should (= 3 (ghostel-input-start-point)))))
+
+(ert-deftest ghostel-test-input-start-point-without-prop-uses-cursor ()
+  "Without `ghostel-prompt' on the cursor row, returns the cursor position."
+  (let ((buf (generate-new-buffer " *ghostel-test-input-nocursor*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (let ((inhibit-read-only t))
+            (insert ">>> hello"))
+          (setq ghostel--term 'fake)
+          (setq ghostel--term-rows 1)
+          (setq ghostel--cursor-char-pos (point))
+          (setq ghostel--cursor-pos (cons (current-column) 0))
+          (should (= (point) (ghostel-input-start-point))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-test-cursor-point-tracks-cursor-char-pos ()
+  "`ghostel-cursor-point' returns `ghostel--cursor-char-pos'."
+  (ghostel-test--with-input-fixture "$ " "hello"
+    (should (= ghostel--cursor-char-pos (ghostel-cursor-point)))))
+
+(ert-deftest ghostel-test-point-on-cursor-row-p-true ()
+  "Returns t when point sits on the cursor's row."
+  (ghostel-test--with-input-fixture "$ " "hello world"
+    (should (ghostel-point-on-cursor-row-p))
+    ;; Explicit position on the same row.
+    (should (ghostel-point-on-cursor-row-p 5))))
+
+(ert-deftest ghostel-test-point-on-cursor-row-p-false-on-other-row ()
+  "Returns nil when POS is on a different buffer row."
+  (let ((buf (generate-new-buffer " *ghostel-test-multirow*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (let ((inhibit-read-only t))
+            (insert "first line\n")
+            (insert (propertize "$ " 'ghostel-prompt t))
+            (insert "second"))
+          (setq ghostel--term 'fake)
+          (setq ghostel--term-rows 2)
+          (setq ghostel--cursor-char-pos (point))
+          (setq ghostel--cursor-pos (cons (current-column) 1))
+          ;; Point on the cursor row → t.
+          (should (ghostel-point-on-cursor-row-p))
+          ;; Point on the first row → nil.
+          (should-not (ghostel-point-on-cursor-row-p 5)))
       (kill-buffer buf))))
 
 (ert-deftest ghostel-test-line-mode-requires-anchor ()
@@ -14860,10 +14939,15 @@ slip past the unit tests."
     ghostel-test-mode-switch-keybindings
     ghostel-test-prompt-nav-enters-emacs-mode
     ghostel-test-mode-mutual-exclusivity
-    ghostel-test-line-mode-find-prompt-end
-    ghostel-test-line-mode-find-prompt-end-uses-cursor
-    ghostel-test-line-mode-find-prompt-end-prefers-cursor-over-stale-prompt
-    ghostel-test-line-mode-find-prompt-end-osc133-on-cursor-row
+    ghostel-test-input-start-point-walks-back-without-cursor
+    ghostel-test-input-start-point-uses-cursor-without-prop
+    ghostel-test-input-start-point-prefers-cursor-over-stale-prompt
+    ghostel-test-input-start-point-osc133-on-cursor-row
+    ghostel-test-input-start-point-returns-after-prompt-prop
+    ghostel-test-input-start-point-without-prop-uses-cursor
+    ghostel-test-cursor-point-tracks-cursor-char-pos
+    ghostel-test-point-on-cursor-row-p-true
+    ghostel-test-point-on-cursor-row-p-false-on-other-row
     ghostel-test-line-mode-requires-anchor
     ghostel-test-line-mode-enters-without-osc133
     ghostel-test-copy-to-line-restarts-redraw-timer

@@ -2974,18 +2974,18 @@ renderer (chars typed via the PTY in a previous mode).  Cleared to
 many backspaces to erase them — keeps a subsequent send from
 duplicating the prefix when the shell echoes our line back.")
 
-(defun ghostel--line-mode-find-prompt-end ()
-  "Return the buffer position where line-mode input begins.
+(defun ghostel-input-start-point ()
+  "Return the buffer position where the current input begins.
 The cursor's buffer position is the source of truth — whatever the
 terminal has written sits before it, and user input goes after.
-When the terminal cursor is unavailable (no `ghostel--term', tests),
-fall back to the rightmost `ghostel-prompt' text-property
-character.  When the cursor IS available and the cursor's row
-carries `ghostel-prompt' characters (OSC 133 shell integration),
-return the position right after the last contiguous
-`ghostel-prompt' char on that row; otherwise return the cursor
-position itself.  Returns nil when neither path can locate a
-position (no cursor and no prompt prop)."
+When `ghostel--cursor-char-pos' is nil (no live terminal, or
+cursor not yet positioned), fall back to the rightmost
+`ghostel-prompt' text-property character.  When the cursor IS
+available and the cursor's row carries `ghostel-prompt' characters
+\(OSC 133 shell integration), return the position right after the
+last contiguous `ghostel-prompt' char on that row; otherwise
+return the cursor position itself.  Returns nil when neither path
+can locate a position (no cursor and no prompt prop)."
 
   (let ((cursor-pos ghostel--cursor-char-pos))
     (cond
@@ -3174,7 +3174,7 @@ Trims pure-whitespace tails past the input but preserves any
 non-blank content the renderer wrote past the prompt row (e.g. a
 status bar)."
   (when snapshot
-    (let ((prompt-end (ghostel--line-mode-find-prompt-end)))
+    (let ((prompt-end (ghostel-input-start-point)))
       (when prompt-end
         (let ((inhibit-read-only t)
               (input (plist-get snapshot :input)))
@@ -3223,7 +3223,7 @@ deferred retry.
 
 Assumes `ghostel--term' is non-nil and the buffer is not already
 in line mode (the interactive entry validates these)."
-  (let ((prompt-end (ghostel--line-mode-find-prompt-end))
+  (let ((prompt-end (ghostel-input-start-point))
         (was-frozen (eq ghostel--input-mode 'copy)))
     (when prompt-end
       (pcase ghostel--input-mode
@@ -3464,10 +3464,10 @@ restored."
 (defun ghostel--line-mode-try-resume ()
   "Re-enter line mode and restore the paused snapshot, if possible.
 Called by `ghostel--line-mode-post-redraw' on a 1049/1047 exit.
-If `ghostel--line-mode-find-prompt-end' cannot locate a prompt
+If `ghostel-input-start-point' cannot locate a prompt
 yet (the renderer has not painted the post-TUI buffer yet), the
 paused snapshot is left in place so the next redraw can retry."
-  (when (ghostel--line-mode-find-prompt-end)
+  (when (ghostel-input-start-point)
     (let ((snapshot ghostel--line-mode-paused))
       (setq ghostel--line-mode-paused nil)
       (when (ghostel--line-mode-enter)
@@ -3501,7 +3501,7 @@ fall through — there is no need for an explicit transition cache."
 (defun ghostel--line-mode-post-redraw ()
   "Resume line mode if alt-screen is off and a paused snapshot is armed.
 Runs at the bottom of `ghostel--delayed-redraw' (after the renderer
-paints) so `ghostel--line-mode-find-prompt-end' sees the
+paints) so `ghostel-input-start-point' sees the
 post-TUI buffer state.  Re-attempts every redraw cycle until a
 prompt is locatable — covers the case where the shell prints its
 new prompt one or more redraws after libghostty leaves the alt
@@ -3618,6 +3618,43 @@ pressing \\`C-a' gives the standard column-0 behaviour."
      (line-mode-target (goto-char line-mode-target))
      (prop-target      (goto-char prop-target))
      (t                (move-beginning-of-line 1)))))
+
+
+
+;; Public cursor-state queries
+
+(defun ghostel-cursor-point ()
+  "Return the buffer position of the terminal cursor.
+This is the live editing position — wherever readline / zle /
+prompt_toolkit currently has the cursor — which can sit *inside*
+the typed input when the user moved it back with arrow keys, not
+necessarily at the end of typed content.
+
+Returns nil when no terminal cursor is available."
+  ghostel--cursor-char-pos)
+
+(defun ghostel--viewport-row-at (pos)
+  "Return the 0-indexed viewport row of POS, or nil.
+Counts newlines from `ghostel--viewport-start' to POS's line.
+Returns nil when POS sits above the viewport (i.e. in scrollback)."
+  (when-let* ((vp-start (ghostel--viewport-start)))
+    (when (>= pos vp-start)
+      (save-excursion
+        (goto-char pos)
+        (forward-line 0)
+        (count-lines vp-start (point))))))
+
+(defun ghostel-point-on-cursor-row-p (&optional pos)
+  "Return non-nil when POS (default `point') is on the cursor's row.
+Compares POS's buffer line to the terminal cursor's row (after
+adjusting for scrollback).  Returns nil when no terminal cursor is
+available."
+  (when (and ghostel--term ghostel--cursor-pos)
+    (let* ((p (or pos (point)))
+           (trow (cdr ghostel--cursor-pos))
+           (prow (ghostel--viewport-row-at p)))
+      (and prow (= prow trow)))))
+
 
 (defun ghostel--line-mode-replace-input (text)
   "Replace the current in-progress input with TEXT."
