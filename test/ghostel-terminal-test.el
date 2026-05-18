@@ -172,12 +172,14 @@ hand nil to the native module."
           (ghostel-mode)
           ;; Default: cursor changes are applied
           (let ((ghostel-ignore-cursor-change nil))
+            (setq cursor-type 'box)
             (ghostel--set-cursor-style 2 t)
             (should (equal cursor-type '(hbar . 2))))
           ;; With ignore: cursor changes are suppressed
           (let ((ghostel-ignore-cursor-change t))
+            (setq cursor-type 'box)
             (ghostel--set-cursor-style 1 t)
-            (should (equal cursor-type '(hbar . 2)))))  ; unchanged
+            (should (equal cursor-type 'box))))  ; unchanged
       (kill-buffer buf))))
 
 (provide 'ghostel-terminal-test)

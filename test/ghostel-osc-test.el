@@ -137,10 +137,12 @@ the URI in the buffer."
 (ert-deftest ghostel-test-osc9-notification ()
   "OSC 9 iTerm2-style notifications reach `ghostel-notification-function'."
   :tags '(native)
-  (let ((term (ghostel--new 25 80 1000))
-        (calls nil))
-    (cl-letf (((symbol-function 'ghostel--handle-notification)
-               (lambda (title body) (push (cons title body) calls))))
+  (let* ((term (ghostel--new 25 80 1000))
+         (calls nil)
+         (ghostel-notification-function
+          (lambda (title body) (push (cons title body) calls))))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_secs _rep fn &rest args) (apply fn args))))
       ;; Plain iTerm2 notification, ST terminator.
       (ghostel--write-input term "\e]9;Hello world\e\\")
       (should (equal '(("" . "Hello world")) calls))
@@ -241,79 +243,79 @@ reported path and no notification fires."
 (ert-deftest ghostel-test-osc9-progress ()
   "OSC 9;4 progress reports reach `ghostel-progress-function'."
   :tags '(native)
-  (let ((term (ghostel--new 25 80 1000))
-        (calls nil))
-    (cl-letf (((symbol-function 'ghostel--osc-progress)
-               (lambda (state progress) (push (list state progress) calls))))
-      ;; set, with progress
-      (ghostel--write-input term "\e]9;4;1;50\e\\")
-      (should (equal '(("set" 50)) calls))
+  (let* ((term (ghostel--new 25 80 1000))
+         (calls nil)
+         (ghostel-progress-function
+          (lambda (state progress) (push (list state progress) calls))))
+    ;; set, with progress
+    (ghostel--write-input term "\e]9;4;1;50\e\\")
+    (should (equal '((set 50)) calls))
 
-      ;; set without progress defaults to 0 (matches ghostty-vt)
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;1\e\\")
-      (should (equal '(("set" 0)) calls))
+    ;; set without progress defaults to 0 (matches ghostty-vt)
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;1\e\\")
+    (should (equal '((set 0)) calls))
 
-      ;; remove
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;0\e\\")
-      (should (equal '(("remove" nil)) calls))
+    ;; remove
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;0\e\\")
+    (should (equal '((remove nil)) calls))
 
-      ;; remove ignores trailing progress (matches ghostty-vt's "remove
-      ;; ignores progress" test)
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;0;100\e\\")
-      (should (equal '(("remove" nil)) calls))
+    ;; remove ignores trailing progress (matches ghostty-vt's "remove
+    ;; ignores progress" test)
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;0;100\e\\")
+    (should (equal '((remove nil)) calls))
 
-      ;; error without progress
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;2\e\\")
-      (should (equal '(("error" nil)) calls))
+    ;; error without progress
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;2\e\\")
+    (should (equal '((error nil)) calls))
 
-      ;; error with progress
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;2;73\e\\")
-      (should (equal '(("error" 73)) calls))
+    ;; error with progress
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;2;73\e\\")
+    (should (equal '((error 73)) calls))
 
-      ;; indeterminate
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;3\e\\")
-      (should (equal '(("indeterminate" nil)) calls))
+    ;; indeterminate
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;3\e\\")
+    (should (equal '((indeterminate nil)) calls))
 
-      ;; indeterminate ignores trailing progress
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;3;50\e\\")
-      (should (equal '(("indeterminate" nil)) calls))
+    ;; indeterminate ignores trailing progress
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;3;50\e\\")
+    (should (equal '((indeterminate nil)) calls))
 
-      ;; pause with progress
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;4;25\e\\")
-      (should (equal '(("pause" 25)) calls))
+    ;; pause with progress
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;4;25\e\\")
+    (should (equal '((pause 25)) calls))
 
-      ;; Trailing semicolon is tolerated (9;4;0;)
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;0;\e\\")
-      (should (equal '(("remove" nil)) calls))
+    ;; Trailing semicolon is tolerated (9;4;0;)
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;0;\e\\")
+    (should (equal '((remove nil)) calls))
 
-      ;; Progress overflow clamps to 100
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;1;999\e\\")
-      (should (equal '(("set" 100)) calls))
+    ;; Progress overflow clamps to 100
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;1;999\e\\")
+    (should (equal '((set 100)) calls))
 
-      ;; Huge numbers beyond u16 still parse and clamp (would overflow
-      ;; u16, but parser uses u64).
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;1;99999999999\e\\")
-      (should (equal '(("set" 100)) calls))
+    ;; Huge numbers beyond u16 still parse and clamp (would overflow
+    ;; u16, but parser uses u64).
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;1;99999999999\e\\")
+    (should (equal '((set 100)) calls))
 
-      ;; Non-numeric progress: value falls back to the state's default
-      ;; (0 for set, nil for error/pause).
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;1;foo\e\\")
-      (should (equal '(("set" 0)) calls))
-      (setq calls nil)
-      (ghostel--write-input term "\e]9;4;2;foo\e\\")
-      (should (equal '(("error" nil)) calls)))))
+    ;; Non-numeric progress: value falls back to the state's default
+    ;; (0 for set, nil for error/pause).
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;1;foo\e\\")
+    (should (equal '((set 0)) calls))
+    (setq calls nil)
+    (ghostel--write-input term "\e]9;4;2;foo\e\\")
+    (should (equal '((error nil)) calls))))
 
 (ert-deftest ghostel-test-osc-progress-dispatch ()
   "`ghostel--osc-progress' converts the state string to a symbol."
@@ -327,8 +329,10 @@ reported path and no notification fires."
       (should (equal '((remove nil)) calls))
       ;; Unknown state strings are dropped without invoking the handler
       ;; (defends against a Zig-side typo polluting the obarray).
+      ;; `calls' is populated only by `ghostel-progress-function', so
+      ;; asserting it stayed nil proves the sink was not invoked.
       (setq calls nil)
-      (ghostel--osc-progress "bogus" 1)
+      (should-not (ghostel--osc-progress "bogus" 1))
       (should (equal nil calls)))
     ;; nil function → no call, no error
     (let ((ghostel-progress-function nil))
@@ -370,9 +374,11 @@ the handler off the VT-parser callpath."
              (lambda (title body) (push (cons title body) calls))))
         (ghostel--handle-notification "T" "B")
         (should (equal '(("T" . "B")) calls)))
-      ;; nil → silently ignored
+      ;; nil → silently ignored: returns nil and does not signal.
       (let ((ghostel-notification-function nil))
-        (should-not (ghostel--handle-notification "T" "B")))
+        (should-not (condition-case _
+                        (progn (ghostel--handle-notification "T" "B") nil)
+                      (error t))))
       ;; Error in handler is demoted to message (does not propagate)
       (let ((ghostel-notification-function (lambda (_t _b) (error "Boom")))
             (inhibit-message t)
@@ -457,7 +463,10 @@ killed-buffer one did not fire."
 (ert-deftest ghostel-test-default-notify-uses-alert ()
   "Route notifications through `alert' when the package is available.
 `alert' is pre-provided so the branch fires under batch mode
-without the real package installed."
+without the real package installed.  Also verifies that
+`ghostel-notification-function' is wired to `ghostel-default-notify'
+by default, so a notification arriving through the dispatcher ends
+up at the alert backend."
   (provide 'alert)
   (let ((captured nil))
     (cl-letf (((symbol-function 'alert)
@@ -465,7 +474,19 @@ without the real package installed."
       (ghostel-default-notify "Title" "body text")
       (should captured)
       (should (equal (car captured) "body text"))
-      (should (equal (plist-get (cdr captured) :title) "Title")))))
+      (should (equal (plist-get (cdr captured) :title) "Title"))
+
+      ;; Wiring: the dispatcher's default sink is `ghostel-default-notify',
+      ;; so going through `ghostel--handle-notification' must also hit the
+      ;; alert mock.  `run-at-time' is stubbed synchronous.
+      (setq captured nil)
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_secs _rep fn &rest args) (apply fn args))))
+        (should (eq ghostel-notification-function #'ghostel-default-notify))
+        (ghostel--handle-notification "Wired" "via dispatch")
+        (should captured)
+        (should (equal (car captured) "via dispatch"))
+        (should (equal (plist-get (cdr captured) :title) "Wired"))))))
 
 (ert-deftest ghostel-test-default-notify-empty-title-uses-buffer-name ()
   "When TITLE is empty, the alert uses the current buffer's name."
@@ -497,7 +518,13 @@ without the real package installed."
 (ert-deftest ghostel-test-spinner-progress-errors-without-spinner ()
   "`ghostel-spinner-progress' signals a user-error when spinner.el is absent.
 Stubs `require' to refuse loading `spinner' so the test does not depend on
-whether spinner.el is actually installed in the test env."
+whether spinner.el is actually installed in the test env.
+
+FIXME: stubbing `require' is fragile — a stronger test would
+exercise the real no-spinner path (e.g. via a sandboxed `load-path'
+with no spinner.el available).  The stub currently matches reality
+\(returns nil for `(require 'spinner nil t)' when absent), but a
+future refactor of the require call would silently invalidate it."
   (cl-letf* ((orig-require (symbol-function #'require))
              ((symbol-function #'require)
               (lambda (feature &optional filename noerror)

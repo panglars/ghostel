@@ -54,14 +54,18 @@ buffer eventually shows up."
           (cl-letf (((symbol-function 'ghostel--load-module) #'ignore)
                     ((symbol-function 'ghostel--new)
                      (lambda (&rest args) (setq captured args) 'fake-term))
-                    ((symbol-function 'ghostel--set-size) #'ignore)
+                    ((symbol-function 'ghostel--set-size-with-cell-dims) #'ignore)
                     ((symbol-function 'ghostel--apply-palette) #'ignore)
                     ((symbol-function 'ghostel--spawn-pty)
                      (lambda (&rest _) 'fake-proc)))
             (ghostel-exec buf "ls" nil)
-            ;; ghostel--new is called as (height width max-scrollback).
-            (should (equal (nth 0 captured) 24))
-            (should (equal (nth 1 captured) 80))))
+            ;; ghostel--new is called as
+            ;; (height width max-scrollback kitty-storage-limit kitty-mediums-bits).
+            (should (equal captured
+                           (list 24 80
+                                 ghostel-max-scrollback
+                                 ghostel-kitty-graphics-storage-limit
+                                 (ghostel--kitty-mediums-bits))))))
       (kill-buffer buf))))
 
 (ert-deftest ghostel-test-eshell-visual-command-mode-toggles-advice ()

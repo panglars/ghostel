@@ -229,21 +229,20 @@ attached."
 (ert-deftest ghostel-test-delayed-redraw-skips-native-redraw-without-window ()
   "When the buffer has no window, `ghostel--delayed-redraw' must not call \
 `ghostel--redraw'."
-  (let ((buf (generate-new-buffer " *ghostel-test-no-window-redraw*")))
+  (let ((buf (generate-new-buffer " *ghostel-test-no-window-redraw*"))
+        (ghostel-detect-password-prompts nil))
     (unwind-protect
         (with-current-buffer buf
           (ghostel-mode)
+          ;; The buffer from `generate-new-buffer' is not displayed in
+          ;; any window, so `ghostel--get-render-window' returns nil
+          ;; naturally — no need to stub `get-buffer-window-list'.
           (let ((ghostel--term t)
                 (redraw-called nil))
-            (cl-letf (((symbol-function 'ghostel--flush-pending-output) #'ignore)
-                      ((symbol-function 'ghostel--mode-enabled)
+            (cl-letf (((symbol-function 'ghostel--mode-enabled)
                        (lambda (&rest _) nil))
-                      ((symbol-function 'ghostel--correct-mangled-scroll-positions)
-                       #'ignore)
                       ((symbol-function 'ghostel--redraw)
-                       (lambda (&rest _) (setq redraw-called t)))
-                      ((symbol-function 'get-buffer-window-list)
-                       (lambda (&rest _) nil)))
+                       (lambda (&rest _) (setq redraw-called t))))
               (ghostel--delayed-redraw buf)
               (should-not redraw-called))))
       (kill-buffer buf))))
@@ -1500,7 +1499,12 @@ GTK/PGTK input-method candidate windows are anchored to the preedit
 overlay at point.  During streaming TUI output, native redraws move
 point to the terminal cursor; while preedit text is visible, the
 composing window must instead keep the overlay and `window-point' at
-the same viewport row and column."
+the same viewport row and column.
+FIXME: `ghostel--term' is bound to a placeholder rather than a real
+native handle, and `ghostel--redraw' is stubbed to simulate the
+destructive renderer behavior.  A clean rewrite would need a real
+terminal fixture with a preedit overlay that survives the renderer's
+buffer rewrite at the right viewport row — non-trivial fixture work."
   (let ((buf (generate-new-buffer " *ghostel-test-preedit-anchor*"))
         (orig-buf (window-buffer (selected-window)))
         (old-bound (boundp 'x-preedit-overlay))
@@ -1752,11 +1756,13 @@ to restore to a missing line."
                   (list (cons (selected-window)
                               (list '("scroll-10") '("scroll-11") 0))))
             (setq ghostel--last-anchor-position 42)
-            (cl-letf (((symbol-function 'ghostel--write-input)
-                       (lambda (&rest _) nil))
-                      ((symbol-function 'ghostel--invalidate) #'ignore))
-              (setq ghostel--process nil)
-              (ghostel-clear-scrollback))
+            (setq ghostel--process nil)
+            (ghostel-clear-scrollback)
+            ;; `ghostel--invalidate' schedules a redraw timer that
+            ;; would otherwise fire after the buffer is killed.
+            (when (timerp ghostel--redraw-timer)
+              (cancel-timer ghostel--redraw-timer)
+              (setq ghostel--redraw-timer nil))
             (should-not ghostel--scroll-positions)
             (should-not ghostel--last-anchor-position)))
       (when (buffer-live-p orig-buf)

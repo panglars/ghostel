@@ -498,7 +498,13 @@ Smoke test for the C boundary: feeds a 1x1 RGB transmission, redraws,
 and checks that the elisp callback receives the expected geometry and
 unibyte image data.  Without this, protocol-level regressions in the
 Zig glue (placement iterator, render-info query, RGBA→PPM conversion)
-slip past the unit tests."
+slip past the unit tests.
+
+FIXME: This stubs `ghostel--kitty-display-image' to capture arguments
+crossing the C boundary, so it does not actually exercise the elisp
+display path end-to-end.  Letting the real function run in batch would
+require a working `create-image' on PPM data and Emacs GUI state; for
+now we verify only the arguments the native module hands off."
   :tags '(native)
   (let ((buf (generate-new-buffer " *ghostel-test-kitty-end-to-end*"))
         (calls nil))
@@ -755,6 +761,7 @@ the bright variant just like in `bright' mode."
                (ghostel--redraw term t)
                (goto-char (point-min))
                (let ((glyph-disp (get-text-property (point) 'display)))
+                 (should (assq 'min-width glyph-disp))
                  (should (equal (cadr (assq 'min-width glyph-disp)) '(2))))
                (forward-char 1)
                (should (equal (get-text-property (point) 'display) '(space :width 0)))))))
@@ -834,14 +841,21 @@ the bright variant just like in `bright' mode."
                    (inhibit-read-only t)
                    (df (ghostel-test--make-font ghostel-test--default-font-info)))
               (ghostel--write-input term "a")
-              ;; No :glyph-font — if the code incorrectly tried to adjust this
-              ;; glyph, `font-at' would be unbound and the test would fail.
-              (ghostel-test--with-glyph-mocks
-               (:default-font df)
-               (ghostel--redraw term t)
-               (goto-char (point-min))
-               (should (equal (char-after) ?a))
-               (should-not (get-text-property (point) 'display))))))
+              ;; Tripwire: if the code wrongly tried to adjust this glyph it
+              ;; would call `font-at', and the deliberately-broken stub below
+              ;; would fail the test.
+              (cl-letf (((symbol-function 'font-at)
+                         (lambda (&rest _)
+                           (error "font-at must not be called for covered glyphs"))))
+                (ghostel-test--with-glyph-mocks
+                 (:default-font df)
+                 (ghostel--redraw term t)
+                 (goto-char (point-min))
+                 (should (equal (char-after) ?a))
+                 ;; No adjustment side effects: no display property and no
+                 ;; overlays were created on the rendered text.
+                 (should-not (get-text-property (point) 'display))
+                 (should (null (overlays-in (point-min) (point-max)))))))))
       (kill-buffer buf))))
 
 (provide 'ghostel-glyph-kitty-test)

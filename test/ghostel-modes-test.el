@@ -112,10 +112,9 @@ unlike semi-char mode where it tracks the terminal cursor."
         (with-current-buffer buf
           (ghostel-mode)
           (require 'hl-line)
-          ;; Simulate global-hl-line-mode being active
+          ;; Simulate global-hl-line-mode being active.
           (let ((global-hl-line-mode t))
-            (should global-hl-line-mode)
-            ;; Suppress should opt this buffer out
+            ;; Suppress should opt this buffer out.
             (ghostel--suppress-interfering-modes)
             (should ghostel--saved-hl-line-mode)
             ;; Buffer-local global-hl-line-mode must be nil — this is the
@@ -392,12 +391,29 @@ unlike semi-char mode where it tracks the terminal cursor."
       (kill-buffer buf))))
 
 (ert-deftest ghostel-test-copy-mode-recenter ()
-  "Copy-mode recenter delegates to the standard `recenter' command."
-  (let ((called nil))
-    (cl-letf (((symbol-function 'recenter)
-               (lambda (&rest _) (setq called t))))
-      (ghostel-readonly-recenter)
-      (should called))))
+  "`ghostel-readonly-recenter' actually moves point toward window center."
+  (let ((buf (generate-new-buffer " *ghostel-test-recenter*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (set-window-buffer (selected-window) buf)
+          (dotimes (i 200) (insert (format "line %d\n" i)))
+          (goto-char (point-min))
+          (forward-line 100)
+          (set-window-point (selected-window) (point))
+          ;; Push point near the bottom of the window.
+          (recenter -1)
+          (let ((before-line (line-number-at-pos (window-point))))
+            ;; Sanity: point is well below the vertical midpoint.
+            (should (> before-line
+                       (+ (line-number-at-pos (window-start))
+                          (/ (window-body-height) 2))))
+            (ghostel-readonly-recenter)
+            (let* ((mid-line (+ (line-number-at-pos (window-start))
+                                (/ (window-body-height) 2)))
+                   (after-line (line-number-at-pos (window-point))))
+              ;; After recenter, point is within ~1 line of midpoint.
+              (should (<= (abs (- after-line mid-line)) 1)))))
+      (kill-buffer buf))))
 
 (ert-deftest ghostel-test-input-mode-default-is-semi-char ()
   "A fresh `ghostel-mode' buffer starts in semi-char mode."
@@ -421,7 +437,8 @@ unlike semi-char mode where it tracks the terminal cursor."
     (should-not (ghostel--terminal-frozen-p)))
   (let ((ghostel--input-mode 'char))
     (should (ghostel--buffer-editable-p))
-    (should (ghostel--terminal-live-p)))
+    (should (ghostel--terminal-live-p))
+    (should-not (ghostel--terminal-frozen-p)))
   (let ((ghostel--input-mode 'emacs))
     (should-not (ghostel--buffer-editable-p))
     (should (ghostel--terminal-live-p)))

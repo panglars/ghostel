@@ -675,6 +675,12 @@ native URI lookup when Emacs invokes it for tooltip display or clicking."
                 (ghostel-enable-file-detection nil)
                 (scheduled-count 0)
                 timer-delay timer-repeat timer-fn timer-args)
+            ;; FIXME: `ghostel--redraw' is stubbed because `ghostel--term'
+            ;; here is the placeholder symbol `t', not a real native handle,
+            ;; so the real renderer would crash.  The test still observes the
+            ;; intended side effect (link-detection timer scheduling) via the
+            ;; `run-with-timer' mock below.  A cleaner rewrite would require
+            ;; spinning up a real terminal fixture.
             (cl-letf (((symbol-function 'run-with-timer)
                        (lambda (delay repeat fn &rest args)
                          (setq scheduled-count (1+ scheduled-count)
@@ -726,13 +732,13 @@ native URI lookup when Emacs invokes it for tooltip display or clicking."
                 (ghostel-enable-url-detection t)
                 (ghostel-enable-file-detection nil)
                 (scheduled-count 0)
-                timer-fn timer-args)
+                timer-repeat timer-fn timer-args)
             (cl-letf (((symbol-function 'run-with-timer)
                        (lambda (_delay repeat fn &rest args)
                          (setq scheduled-count (1+ scheduled-count)
+                               timer-repeat repeat
                                timer-fn fn
                                timer-args args)
-                         (should (null repeat))
                          'ghostel-test-link-timer))
                       ((symbol-function 'ghostel--flush-pending-output) #'ignore)
                       ((symbol-function 'ghostel--mode-enabled)
@@ -763,6 +769,7 @@ native URI lookup when Emacs invokes it for tooltip display or clicking."
                 (should (null (get-text-property first-beg 'help-echo)))
                 (should (null (get-text-property second-beg 'help-echo)))
                 (should (= scheduled-count 1))
+                (should (null timer-repeat))
                 (should timer-fn)
                 ;; Move point off the URL lines so the cursor-row skip in
                 ;; `ghostel--detect-urls' doesn't mask either URL when the
@@ -1009,19 +1016,28 @@ native URI lookup when Emacs invokes it for tooltip display or clicking."
 
 (ert-deftest ghostel-test-apply-palette-ghostel-default-face ()
   "`ghostel--apply-palette' reads default fg/bg from `ghostel-default', not `default'."
-  (let ((looked-up nil))
-    (cl-letf (((symbol-function 'ghostel--set-default-colors) #'ignore)
+  (let ((looked-up nil)
+        (default-colors-calls nil))
+    (cl-letf (((symbol-function 'ghostel--set-default-colors)
+               (lambda (term fg bg)
+                 (push (list term fg bg) default-colors-calls)))
               ((symbol-function 'ghostel--set-palette) #'ignore)
               ((symbol-function 'ghostel--face-hex-color)
                (lambda (face _attr)
                  (push face looked-up)
-                 "#000000")))
+                 "#abcdef")))
       (ghostel--apply-palette 'fake-term)
       ;; The two default-color lookups must target `ghostel-default',
       ;; never `default' directly — otherwise buffer-local customization
       ;; of the terminal's fg/bg is impossible (issue #178).
       (should (memq 'ghostel-default looked-up))
-      (should-not (memq 'default looked-up)))))
+      (should-not (memq 'default looked-up))
+      ;; The mocked color must reach `ghostel--set-default-colors',
+      ;; proving the function used the lookup result rather than a
+      ;; hardcoded value.
+      (should (= 1 (length default-colors-calls)))
+      (should (equal (list 'fake-term "#abcdef" "#abcdef")
+                     (car default-colors-calls))))))
 
 (provide 'ghostel-render-test)
 ;;; ghostel-render-test.el ends here

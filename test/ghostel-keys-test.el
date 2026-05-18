@@ -353,9 +353,12 @@ where the ordering invariant lives."
            (binding (lookup-key ghostel-semi-char-mode-map key-vec)))
       ;; Skip exceptions (may have sub-keymaps like C-c C-c)
       (unless (member key-str ghostel-keymap-exceptions)
-        (should binding))))
-  ;; C-@ should also be bound (sends NUL)
-  (should (lookup-key ghostel-semi-char-mode-map (kbd "C-@"))))
+        ;; Must be an actual command (interactive function or symbol),
+        ;; not just non-nil — `(should binding)' would have accepted a
+        ;; sub-keymap or numeric prefix-arg too.
+        (should (commandp binding)))))
+  ;; C-@ should also be bound (sends NUL).
+  (should (commandp (lookup-key ghostel-semi-char-mode-map (kbd "C-@")))))
 
 (ert-deftest ghostel-test-c-g-binding ()
   "`ghostel-mode-map' binds the quit key to a dedicated send handler."
@@ -463,7 +466,9 @@ Regression test for issue #239: these byte sequences match readline
 
 (ert-deftest ghostel-test-special-key-modifier-bindings ()
   "Modified special keys are bound unless in `ghostel-keymap-exceptions'.
-Covers e.g. C-<return>, C-M-<down>, S-<f1>."
+Covers e.g. C-<return>, C-M-<down>, S-<f1>.
+Bindings live on `ghostel-semi-char-mode-map' (not `ghostel-mode-map').
+`S-<insert>' is the documented exception — bound to `ghostel-yank'."
   (dolist (key '("<return>" "<tab>" "<backspace>" "<escape>"
                  "<up>" "<down>" "<right>" "<left>"
                  "<home>" "<end>" "<prior>" "<next>"
@@ -472,11 +477,15 @@ Covers e.g. C-<return>, C-M-<down>, S-<f1>."
                  "<f7>" "<f8>" "<f9>" "<f10>" "<f11>" "<f12>"))
     (dolist (mod '("" "S-" "C-" "M-" "C-S-" "M-S-" "C-M-"))
       (let* ((key-str (concat mod key))
-             (binding (ignore-errors (lookup-key ghostel-mode-map (kbd key-str)))))
-        (if (member key-str ghostel-keymap-exceptions)
-            (should-not (eq binding #'ghostel--send-event))
-          (when binding
-            (should (eq binding #'ghostel--send-event))))))))
+             (binding (ignore-errors
+                        (lookup-key ghostel-semi-char-mode-map (kbd key-str)))))
+        (cond
+         ((member key-str ghostel-keymap-exceptions)
+          (should-not (eq binding #'ghostel--send-event)))
+         ((equal key-str "S-<insert>")
+          (should (eq binding #'ghostel-yank)))
+         (t
+          (should (eq binding #'ghostel--send-event))))))))
 
 (ert-deftest ghostel-test-special-key-exceptions-honored ()
   "Keymap construction honors `ghostel-keymap-exceptions' for special keys.

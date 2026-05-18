@@ -267,9 +267,19 @@ result must be 2 to prove the prop branch is consulted first."
       (kill-buffer buf))))
 
 (ert-deftest ghostel-test-cursor-point-tracks-cursor-char-pos ()
-  "`ghostel-cursor-point' returns `ghostel--cursor-char-pos'."
+  "`ghostel-cursor-point' returns the cursor position, not `(point)'.
+Also verifies the documented nil-return when no cursor is available."
   (ghostel-test--with-input-fixture "$ " "hello"
-    (should (= ghostel--cursor-char-pos (ghostel-cursor-point)))))
+    (let ((cursor-pos ghostel--cursor-char-pos))
+      ;; Move point away from the cursor and verify the function still
+      ;; returns the cursor position — proves it reads
+      ;; `ghostel--cursor-char-pos', not `(point)'.
+      (goto-char (point-min))
+      (should-not (= (point) cursor-pos))
+      (should (= cursor-pos (ghostel-cursor-point))))
+    ;; Documented contract: nil when no cursor is available.
+    (let ((ghostel--cursor-char-pos nil))
+      (should-not (ghostel-cursor-point)))))
 
 (ert-deftest ghostel-test-point-on-cursor-row-p-true ()
   "Returns t when point sits on the cursor's row."

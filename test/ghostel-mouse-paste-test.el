@@ -298,8 +298,7 @@ redraw and produce visible flicker, so point is left alone."
       (should (equal 4 (nth 1 mouse-event-args)))   ; button 4 = scroll up
       (should (equal 5 (nth 2 mouse-event-args)))   ; row
       (should (equal 10 (nth 3 mouse-event-args)))  ; col
-      ;; Event should NOT be re-dispatched
-      (should ghostel--scroll-intercept-active)
+      ;; Event should NOT be re-dispatched.
       (should-not unread-command-events))
     ;; Reset and test scroll-down with a wheel-down event
     (setq mouse-event-args nil)
@@ -312,7 +311,6 @@ redraw and produce visible flicker, so point is left alone."
         (ghostel--scroll-intercept-down fake-down-event)
         (should mouse-event-args)
         (should (equal 5 (nth 1 mouse-event-args)))   ; button 5 = scroll down
-        (should ghostel--scroll-intercept-active)
         (should-not unread-command-events)))))
 
 (ert-deftest ghostel-test-scroll-intercept-fallthrough ()
@@ -843,6 +841,13 @@ buffer happened to be current and paste into the wrong terminal."
                  (lambda (w) (setq selected-arg w))))
         (ghostel-mouse-paste-primary-or-release fake-event))
       (should (eq target-window selected-arg)))))
+
+;; FIXME: The tests below this point mock `ghostel-readonly-exit' to
+;; isolate the decision logic (when does the readonly RET path call
+;; exit?).  This means the exit mechanism itself — what
+;; `ghostel-readonly-exit' actually does to the buffer / mode state —
+;; is not exercised end-to-end here.  A dedicated test for the exit
+;; mechanism is missing and should be added separately.
 
 (ert-deftest ghostel-test-readonly-RET-on-link-opens-link ()
   "RET on a hyperlink with fast-exit opens the link and exits read-only mode.

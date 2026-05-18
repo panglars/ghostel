@@ -28,11 +28,13 @@
       (should-not (string-match-p "\\*\\*" (cdr result))))))
 
 (ert-deftest ghostel-test-project-universal-arg ()
-  "Test that `ghostel-project' passes the universal arg to `ghostel'."
+  "`ghostel-project' forwards the prefix arg AND binds `ghostel-buffer-name'.
+The captured value of `ghostel-buffer-name' at `ghostel' call time
+proves the project-prefixed binding actually took effect."
   (require 'project)
   ;; Numeric prefix arg (C-5 M-x ghostel-project)
   (let ((ghostel-buffer-name "*ghostel*")
-        result)
+        captured)
     (cl-letf (((symbol-function 'project-current)
                (lambda (_maybe-prompt) '(transient . "/tmp/myproj/")))
               ((symbol-function 'project-root)
@@ -41,12 +43,13 @@
                (lambda (name) (format "*myproj-%s*" name)))
               ((symbol-function 'ghostel)
                (lambda (&optional arg)
-                 (setq result arg))))
+                 (setq captured (cons arg ghostel-buffer-name)))))
       (ghostel-project 4)
-      (should (equal 4 result))))
+      (should (equal (car captured) 4))
+      (should (equal (cdr captured) "*myproj-ghostel*"))))
   ;; Universal prefix arg (C-u M-x ghostel-project)
   (let ((ghostel-buffer-name "*ghostel*")
-        result)
+        captured)
     (cl-letf (((symbol-function 'project-current)
                (lambda (_maybe-prompt) '(transient . "/tmp/myproj/")))
               ((symbol-function 'project-root)
@@ -55,9 +58,10 @@
                (lambda (name) (format "*myproj-%s*" name)))
               ((symbol-function 'ghostel)
                (lambda (&optional arg)
-                 (setq result arg))))
+                 (setq captured (cons arg ghostel-buffer-name)))))
       (ghostel-project '(4))
-      (should (equal '(4) result)))))
+      (should (equal (car captured) '(4)))
+      (should (equal (cdr captured) "*myproj-ghostel*")))))
 
 (ert-deftest ghostel-test-reuses-identity-match-after-rename ()
   "`ghostel' reuses an identity-matched buffer after a title-tracking rename."
