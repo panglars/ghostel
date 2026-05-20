@@ -6,6 +6,7 @@ const std = @import("std");
 
 const emacs = @import("emacs.zig");
 const gt = @import("ghostty-vt");
+const GhostelHandler = @import("GhostelHandler.zig");
 const Renderer = @import("Renderer.zig");
 
 const Self = @This();
@@ -13,8 +14,10 @@ const Self = @This();
 /// The libghostty Terminal.
 terminal: gt.Terminal,
 
-/// The libghostty Stream
-stream: gt.TerminalStream,
+/// The libghostty Stream, wrapped in our `GhostelHandler` so we can
+/// intercept OSC actions (PWD, clipboard, notifications, color queries,
+/// semantic prompt) without re-parsing the bytes ourselves.
+stream: gt.Stream(GhostelHandler),
 
 /// True iff the last byte of the previous `fnWriteInput` input was
 /// `\r`. Carries the bare-LF detection state across write-input calls
@@ -57,8 +60,8 @@ pub fn init(cols: u16, rows: u16, max_scrollback: usize, effects: gt.TerminalStr
     };
     errdefer term.terminal.deinit(std.heap.c_allocator);
 
-    var handler = term.terminal.vtHandler();
-    handler.effects = effects;
+    var handler = GhostelHandler.init(&term.terminal);
+    handler.inner.effects = effects;
     term.stream = .initAlloc(std.heap.c_allocator, handler);
     errdefer term.stream.deinit();
 
