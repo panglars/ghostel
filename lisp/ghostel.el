@@ -1959,7 +1959,6 @@ top so that \\`q', \\`C-g', or any self-insert key exits."
   "C-w"            #'ghostel-readonly-copy
   "M->"            #'ghostel-readonly-end-of-buffer
   "C-e"            #'ghostel-readonly-end-of-line
-  "C-l"            #'ghostel-readonly-recenter
   "RET"            #'ghostel-open-link-at-point
   "<return>"       #'ghostel-open-link-at-point)
 
@@ -2494,11 +2493,6 @@ Return non-nil if the event was forwarded (mouse tracking is active)."
   (interactive)
   (end-of-line)
   (skip-chars-backward " \t"))
-
-(defun ghostel-readonly-recenter ()
-  "Recenter the current line in the window."
-  (interactive)
-  (recenter))
 
 
 ;;; Mouse input
