@@ -14,75 +14,63 @@
 The delayed redraw path always preserves point in Emacs mode,
 unlike semi-char mode where it tracks the terminal cursor."
   :tags '(native)
-  (let ((buf (generate-new-buffer " *ghostel-test-emacs-pt*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (set-window-buffer (selected-window) buf)
-          (ghostel-mode)
-          (setq ghostel--term (ghostel--new 5 80 1000))
-          (setq ghostel--term-rows 5)
-          ;; Write some rows and redraw to populate the buffer.
-          (dotimes (i 10)
-            (ghostel--write-input ghostel--term
-                                  (format "row-%02d\r\n" i)))
-          (let ((inhibit-read-only t))
-            (ghostel--redraw ghostel--term t))
-          ;; Enter emacs mode and navigate to the top.
-          (cl-letf (((symbol-function 'ghostel--invalidate) #'ignore)
-                    ((symbol-function 'ghostel--scroll-bottom) #'ignore))
-            (ghostel-emacs-mode))
-          (goto-char (point-min))
-          (let ((mark (point)))
-            ;; More output streams in. Run the delayed redraw
-            ;; synchronously (as the timer would).
-            (dotimes (i 5)
-              (ghostel--write-input ghostel--term
-                                    (format "new-%02d\r\n" i)))
-            (ghostel--delayed-redraw buf)
-            ;; Point still at point-min — emacs mode preserved it.
-            (should (= (point) mark)))
-          ;; New rows are visible in the buffer.
-          (let ((content (buffer-substring-no-properties
-                          (point-min) (point-max))))
-            (should (string-match-p "new-04" content))))
-      (when (buffer-live-p buf) (kill-buffer buf)))))
+  (ghostel-test--with-terminal-buffer (buf term 5 80 1000)
+    (set-window-buffer (selected-window) buf)
+    ;; Write some rows and redraw to populate the buffer.
+    (dotimes (i 10)
+      (ghostel--write-input term
+                            (format "row-%02d\r\n" i)))
+    (let ((inhibit-read-only t))
+      (ghostel--redraw term t))
+    ;; Enter emacs mode and navigate to the top.
+    (cl-letf (((symbol-function 'ghostel--invalidate) #'ignore)
+              ((symbol-function 'ghostel--scroll-bottom) #'ignore))
+      (ghostel-emacs-mode))
+    (goto-char (point-min))
+    (let ((mark (point)))
+      ;; More output streams in. Run the delayed redraw
+      ;; synchronously (as the timer would).
+      (dotimes (i 5)
+        (ghostel--write-input term
+                              (format "new-%02d\r\n" i)))
+      (ghostel--delayed-redraw buf)
+      ;; Point still at point-min — emacs mode preserved it.
+      (should (= (point) mark)))
+    ;; New rows are visible in the buffer.
+    (let ((content (buffer-substring-no-properties
+                    (point-min) (point-max))))
+      (should (string-match-p "new-04" content)))))
 
 (ert-deftest ghostel-test-copy-mode-freezes-redraws ()
   "In copy mode, `ghostel--delayed-redraw' is a no-op."
   :tags '(native)
-  (let ((buf (generate-new-buffer " *ghostel-test-copy-freeze*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (ghostel-mode)
-          (setq ghostel--term (ghostel--new 5 80 1000))
-          (setq ghostel--term-rows 5)
-          (dotimes (i 3)
-            (ghostel--write-input ghostel--term
-                                  (format "initial-%d\r\n" i)))
-          (let ((inhibit-read-only t))
-            (ghostel--redraw ghostel--term t))
-          (cl-letf (((symbol-function 'ghostel--invalidate) #'ignore)
-                    ((symbol-function 'ghostel--scroll-bottom) #'ignore))
-            (ghostel-copy-mode))
-          (let ((snapshot (buffer-substring-no-properties
-                           (point-min) (point-max))))
-            ;; Feed more output and attempt a redraw.
-            (dotimes (i 3)
-              (ghostel--write-input ghostel--term
-                                    (format "frozen-%d\r\n" i)))
-            (ghostel--delayed-redraw buf)
-            ;; Buffer is unchanged — copy mode gated the redraw.
-            (should (equal snapshot
-                           (buffer-substring-no-properties
-                            (point-min) (point-max)))))
-          ;; Exiting copy mode lets the redraw catch up.
-          (ghostel-readonly-exit)
-          (let ((inhibit-read-only t))
-            (ghostel--redraw ghostel--term t))
-          (let ((content (buffer-substring-no-properties
-                          (point-min) (point-max))))
-            (should (string-match-p "frozen-2" content))))
-      (when (buffer-live-p buf) (kill-buffer buf)))))
+  (ghostel-test--with-terminal-buffer (buf term 5 80 1000)
+    (dotimes (i 3)
+      (ghostel--write-input term
+                            (format "initial-%d\r\n" i)))
+    (let ((inhibit-read-only t))
+      (ghostel--redraw term t))
+    (cl-letf (((symbol-function 'ghostel--invalidate) #'ignore)
+              ((symbol-function 'ghostel--scroll-bottom) #'ignore))
+      (ghostel-copy-mode))
+    (let ((snapshot (buffer-substring-no-properties
+                     (point-min) (point-max))))
+      ;; Feed more output and attempt a redraw.
+      (dotimes (i 3)
+        (ghostel--write-input term
+                              (format "frozen-%d\r\n" i)))
+      (ghostel--delayed-redraw buf)
+      ;; Buffer is unchanged — copy mode gated the redraw.
+      (should (equal snapshot
+                     (buffer-substring-no-properties
+                      (point-min) (point-max)))))
+    ;; Exiting copy mode lets the redraw catch up.
+    (ghostel-readonly-exit)
+    (let ((inhibit-read-only t))
+      (ghostel--redraw term t))
+    (let ((content (buffer-substring-no-properties
+                    (point-min) (point-max))))
+      (should (string-match-p "frozen-2" content)))))
 
 (ert-deftest ghostel-test-copy-mode-cursor ()
   "Test that copy-mode restores cursor visibility when terminal hid it."
