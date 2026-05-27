@@ -777,7 +777,7 @@ Customize the faces `ghostel-fake-cursor' and
   :type 'boolean)
 
 (defcustom ghostel-mouse-drag-input-mode 'copy
-  "Input mode to switch to after a left-button drag selects a region.
+  "Input mode to switch to after a left-button drag or multi-click selects text.
 
 - `copy' (default): enter `ghostel-copy-mode'.  Pauses redraws -
   the selection is stable and the buffer is read-only.
@@ -2615,15 +2615,22 @@ is set so subsequent terminal output cannot clobber the selection."
       (ghostel--mouse-press event)
     (mouse-drag-region event)))
 
-(defun ghostel-mouse-release-or-set-point (event)
+(defun ghostel-mouse-release-or-set-point (event &optional promote-to-region)
   "Forward EVENT to the terminal, or hand off to `mouse-set-point'.
 Companion to `ghostel-mouse-press-or-copy-mode' for the left-button
 release event.  With tracking off, defers to Emacs's standard
-click handler so the release of a non-drag click sets point normally."
-  (interactive "e")
+click handler so the release of a non-drag click sets point normally.
+PROMOTE-TO-REGION is passed through to `mouse-set-point' so that
+double-click and triple-click events keep the word/line selection."
+  (interactive "e\np")
   (if (ghostel--mouse-tracking-active-p)
       (ghostel--mouse-release event)
-    (mouse-set-point event)))
+    (mouse-set-point event promote-to-region)
+    (when (and (eq ghostel--input-mode 'semi-char)
+               (> (event-click-count event) 1))
+      (pcase ghostel-mouse-drag-input-mode
+        ('copy  (ghostel-copy-mode))
+        ('emacs (ghostel-emacs-mode))))))
 
 (defun ghostel-mouse-drag-or-set-region (event)
   "Forward EVENT to the terminal, or hand off to `mouse-set-region'.

@@ -437,12 +437,62 @@ mode or otherwise interfere."
       (cl-letf (((symbol-function 'ghostel--mode-enabled)
                  (lambda (_term _mode) nil))
                 ((symbol-function 'mouse-set-point)
-                 (lambda (event) (setq set-point-arg event)))
+                 (lambda (event &optional _promote) (setq set-point-arg event)))
                 ((symbol-function 'ghostel--mouse-event)
                  (lambda (&rest _) (setq mouse-event-called t) t)))
         (ghostel-mouse-release-or-set-point fake-event))
       (should (equal fake-event set-point-arg))
       (should-not mouse-event-called))))
+
+(ert-deftest ghostel-test-mouse-1-release-no-tracking-promotes-multi-click ()
+  "Release forwards PROMOTE-TO-REGION so double/triple-click selects.
+A double-click release falls back to the single-click binding;
+without forwarding the second arg, `mouse-set-point' would just
+move point and clobber the word selection set by `mouse-drag-region'."
+  :tags '(native)
+  (let ((fake-event `(double-mouse-1 (,(selected-window) 1 (10 . 5) 0)))
+        (set-point-promote nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'mouse-set-point)
+                 (lambda (_event &optional promote) (setq set-point-promote promote))))
+        (ghostel-mouse-release-or-set-point fake-event 1))
+      (should (equal 1 set-point-promote)))))
+
+(ert-deftest ghostel-test-mouse-1-release-multi-click-semi-char-enters-copy-mode ()
+  "Multi-click release in semi-char enters copy mode after the region is set.
+Mirrors the drag handler: terminal output that arrives after a
+double/triple-click would otherwise overwrite the highlighted cells
+and the live cursor advancing would extend the region."
+  :tags '(native)
+  (let ((fake-event `(double-mouse-1 (,(selected-window) 1 (10 . 5) 0) 2))
+        (ghostel-mouse-drag-input-mode 'copy)
+        (set-point-event nil)
+        (copy-mode-called nil)
+        (emacs-mode-called nil)
+        (call-order nil))
+    (with-temp-buffer
+      (setq-local ghostel--term 'fake)
+      (setq-local ghostel--input-mode 'semi-char)
+      (cl-letf (((symbol-function 'ghostel--mode-enabled)
+                 (lambda (_term _mode) nil))
+                ((symbol-function 'mouse-set-point)
+                 (lambda (event &optional _promote)
+                   (setq set-point-event event)
+                   (push 'set-point call-order)))
+                ((symbol-function 'ghostel-copy-mode)
+                 (lambda ()
+                   (setq copy-mode-called t)
+                   (push 'copy-mode call-order)))
+                ((symbol-function 'ghostel-emacs-mode)
+                 (lambda () (setq emacs-mode-called t))))
+        (ghostel-mouse-release-or-set-point fake-event 1))
+      (should (equal fake-event set-point-event))
+      (should copy-mode-called)
+      (should-not emacs-mode-called)
+      (should (equal '(set-point copy-mode) (nreverse call-order))))))
 
 (ert-deftest ghostel-test-mouse-1-release-tracking-forwards ()
   "Release with active tracking forwards via `ghostel--mouse-release'."
@@ -456,7 +506,7 @@ mode or otherwise interfere."
       (cl-letf (((symbol-function 'ghostel--mode-enabled)
                  (lambda (_term mode) (eq mode 1000)))
                 ((symbol-function 'mouse-set-point)
-                 (lambda (_e) (setq set-point-called t)))
+                 (lambda (_e &optional _promote) (setq set-point-called t)))
                 ((symbol-function 'ghostel--mouse-event)
                  (lambda (_term action button row col mods)
                    (setq mouse-event-args (list action button row col mods))
