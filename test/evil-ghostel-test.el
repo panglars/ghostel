@@ -953,6 +953,25 @@ position the cursor no longer holds."
      (evil-ghostel--passthrough-ctrl "a")
      (should-not evil-ghostel--shadow-cursor))))
 
+(ert-deftest evil-ghostel-test-ctrl-passthrough-sends-in-alt-screen ()
+  "Insert-state Ctrl passthrough remains active in alt-screen TUIs.
+`evil-ghostel--active-p' excludes alt-screen so normal-mode editing
+falls through there, but C-u/C-w/etc. must still go to the terminal
+instead of invoking Evil's insert-state editing commands."
+  (evil-ghostel-test--with-evil-buffer
+   (setq-local ghostel--term t)
+   (setq-local ghostel--input-mode 'semi-char)
+   (cl-letf (((symbol-function 'ghostel--mode-enabled)
+              (lambda (_term mode) (= mode 1049))))
+     (should-not (evil-ghostel--active-p))
+     (should (evil-ghostel--ctrl-passthrough-active-p))
+     (let (sent)
+       (cl-letf (((symbol-function 'ghostel--send-encoded)
+                  (lambda (key mods &rest _)
+                    (setq sent (cons key mods)))))
+         (evil-ghostel--passthrough-ctrl "u"))
+       (should (equal '("u" . "ctrl") sent))))))
+
 ;; -----------------------------------------------------------------------
 ;; Test: insert-state entry skips vertical sync
 ;; -----------------------------------------------------------------------
@@ -1545,7 +1564,8 @@ sticks."
     evil-ghostel-test-delete-word-with-trailing-space
     evil-ghostel-test-change-partial-no-post-delete-sync
     evil-ghostel-test-insert-entry-same-viewport-row-with-scrollback
-    evil-ghostel-test-ctrl-passthrough-invalidates-shadow)
+    evil-ghostel-test-ctrl-passthrough-invalidates-shadow
+    evil-ghostel-test-ctrl-passthrough-sends-in-alt-screen)
   "Tests that require only Elisp (no native module).")
 
 (defun evil-ghostel-test-run-elisp ()

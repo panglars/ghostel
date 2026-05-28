@@ -85,6 +85,16 @@ Sets the initial value of the buffer-local state.  Use
        (not (ghostel--mode-enabled ghostel--term 1049))
        (eq ghostel--input-mode 'semi-char)))
 
+(defun evil-ghostel--ctrl-passthrough-active-p ()
+  "Return non-nil when insert-state Ctrl keys should go to the terminal.
+Unlike `evil-ghostel--active-p', this intentionally stays active in
+alt-screen mode: full-screen TUIs own the keyboard, so readline-style
+Ctrl keys like \\`C-u', \\`C-w', \\`C-r' must not fall back to Evil's
+insert-state editing commands."
+  (and evil-ghostel-mode
+       ghostel--term
+       (eq ghostel--input-mode 'semi-char)))
+
 (defun evil-ghostel--line-mode-active-p ()
   "Return non-nil when line mode editing is in effect.
 Line mode buffers shell input as plain buffer text inside
@@ -636,7 +646,7 @@ own bindings (e.g. \\`C-a' → `ghostel-beginning-of-input-or-line',
 \\`C-d' → `ghostel-line-mode-delete-char-or-eof') win over evil's
 defaults; without that, the minor-mode aux map containing this
 passthrough would shadow line mode's local-map binding."
-  (if (evil-ghostel--active-p)
+  (if (evil-ghostel--ctrl-passthrough-active-p)
       (progn
         (ghostel--send-encoded key "ctrl")
         ;; C-a / C-e / C-u / C-w / C-r / C-n / C-p all reposition the
