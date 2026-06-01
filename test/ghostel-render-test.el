@@ -618,6 +618,66 @@ and typed text was invisible."
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
+(ert-deftest ghostel-test-set-title-default-is-pure ()
+  "`ghostel--set-title-default' maps TITLE to a name with no side effects."
+  (with-temp-buffer
+    (let ((name (buffer-name)))
+      (should (equal "*ghostel: My Title*"
+                     (ghostel--set-title-default "My Title")))
+      ;; Pure: computing the name must not rename the current buffer.
+      (should (equal name (buffer-name))))))
+
+(ert-deftest ghostel-test-set-title-custom-pure-function ()
+  "A pure `ghostel-set-title-function' drives the rename.
+Ghostel applies the returned name and still guards a manual rename."
+  (let (buf)
+    (unwind-protect
+        (cl-letf (((symbol-function 'ghostel--new)
+                   (lambda (&rest _args) 'fake-term))
+                  ((symbol-function 'ghostel--set-size) #'ignore)
+                  ((symbol-function 'ghostel--apply-palette)
+                   (lambda (&rest _args) nil))
+                  ((symbol-function 'ghostel--start-process)
+                   (lambda () nil)))
+          (let ((ghostel-set-title-function
+                 (lambda (title) (format "term[%s]" title))))
+            (ghostel)
+            (setq buf (current-buffer))
+            (with-current-buffer buf
+              (ghostel--set-title "A")
+              (should (equal "term[A]" (buffer-name)))
+              (should (equal "term[A]" ghostel--managed-buffer-name))
+              ;; Manual rename is respected: later titles do not clobber it.
+              (rename-buffer "manual title" t)
+              (ghostel--set-title "B")
+              (should (equal "manual title" (buffer-name)))
+              (should (equal "term[A]" ghostel--managed-buffer-name)))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest ghostel-test-set-title-nil-return-keeps-name ()
+  "A nil return from `ghostel-set-title-function' leaves the name unchanged."
+  (let (buf)
+    (unwind-protect
+        (cl-letf (((symbol-function 'ghostel--new)
+                   (lambda (&rest _args) 'fake-term))
+                  ((symbol-function 'ghostel--set-size) #'ignore)
+                  ((symbol-function 'ghostel--apply-palette)
+                   (lambda (&rest _args) nil))
+                  ((symbol-function 'ghostel--start-process)
+                   (lambda () nil)))
+          ;; `ignore' returns nil for any title.
+          (let ((ghostel-set-title-function #'ignore))
+            (ghostel)
+            (setq buf (current-buffer))
+            (with-current-buffer buf
+              (should (equal "*ghostel*" (buffer-name)))
+              (ghostel--set-title "Whatever")
+              (should (equal "*ghostel*" (buffer-name)))
+              (should (equal "*ghostel*" ghostel--managed-buffer-name)))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
 
 
 ;;; Hyperlinks and URL rendering

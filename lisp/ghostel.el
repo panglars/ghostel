@@ -385,11 +385,12 @@ project:
                  (const :tag "Both (union)" both)))
 
 (defcustom ghostel-set-title-function #'ghostel--set-title-default
-  "Function called when the terminal reports a new title (OSC 2).
-Called with one argument, the title string, in the ghostel buffer.
-Set to nil to disable title tracking entirely.
-The default, `ghostel--set-title-default', renames the buffer to
-\"*ghostel: TITLE*\" unless the user has renamed it manually."
+  "Function that maps a terminal title (OSC 2) to a buffer name.
+Called in the ghostel buffer with one argument, the title string, and
+should return the buffer name to use, or nil to leave the name unchanged.
+Ghostel renames the buffer to the returned name, declining
+to do so when the user has renamed the buffer manually.
+Set to nil to disable title tracking entirely."
   :type '(choice (const :tag "Disabled" nil) function))
 
 (defcustom ghostel-kill-buffer-on-exit t
@@ -1679,10 +1680,9 @@ variable re-enables automatic renaming for the next title update.")
 
 (defvar-local ghostel--buffer-identity nil
   "Canonical buffer name used to find this buffer on subsequent `ghostel' calls.
-Set at buffer creation to the value of `ghostel-buffer-name' (or its
-numbered variant) before any title-tracking renames.  Used so that
-`ghostel' and `ghostel-project' can reuse an existing buffer even after
-`ghostel--set-title-default' has renamed it.")
+Set at buffer creation to the value of `ghostel-buffer-name' (or its numbered
+variant) before any title-tracking renames.  Used so that `ghostel' can reuse
+an existing buffer even after `ghostel--set-title' has renamed it.")
 
 (defvar-local ghostel--prompt-positions nil
   "List of prompt positions as (buffer-line . exit-status) pairs.
@@ -5513,19 +5513,22 @@ No-op when FG/BG match the cached values from the previous call."
       (setq ghostel--face-cookie-fg-bg pair))))
 
 (defun ghostel--set-title-default (title)
-  "Update the buffer name with TITLE from the terminal.
-Only acts when the buffer has not been manually renamed by the user."
-  (when (or (null ghostel--managed-buffer-name)
-            (equal (buffer-name) ghostel--managed-buffer-name))
-    (let ((new-name (format "*ghostel: %s*" title)))
-      (rename-buffer new-name t)
-      ;; Keep the actual name because `rename-buffer' may uniquify it.
-      (setq ghostel--managed-buffer-name (buffer-name)))))
+  "Return the default ghostel buffer name for TITLE: \"*ghostel: TITLE*\"."
+  (format "*ghostel: %s*" title))
 
 (defun ghostel--set-title (title)
-  "Dispatch TITLE changes to `ghostel-set-title-function'."
-  (when ghostel-set-title-function
-    (funcall ghostel-set-title-function title)))
+  "Rename the buffer from a terminal TITLE report (OSC 2).
+Call `ghostel-set-title-function' with TITLE to compute the new buffer name,
+unless the user has renamed the buffer manually before.
+A nil return value (or nil function) leaves the buffer name unchanged."
+  (when (and ghostel-set-title-function
+             (or (null ghostel--managed-buffer-name)
+                 (equal (buffer-name) ghostel--managed-buffer-name)))
+    (let ((new-name (funcall ghostel-set-title-function title)))
+      (when (and new-name (not (equal new-name (buffer-name))))
+        (rename-buffer new-name t)
+        ;; Keep the actual name because `rename-buffer' may uniquify it.
+        (setq ghostel--managed-buffer-name (buffer-name))))))
 
 (defun ghostel--set-cursor-style (style visible)
   "Set the cursor style based on terminal state.

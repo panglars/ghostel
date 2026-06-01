@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- `ghostel-set-title-function` is now a pure function: it receives the
+  terminal title (OSC 2) and returns the buffer name to use, or nil to
+  leave the name unchanged.  Ghostel performs the rename, buffer-name
+  uniquification, and the "don't clobber a manually renamed buffer"
+  guard, so a custom title function no longer needs to know about
+  `rename-buffer` or any internal bookkeeping.
+
 ## [0.31.0] — 2026-05-28
 
 ### Added
