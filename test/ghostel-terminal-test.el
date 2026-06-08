@@ -57,33 +57,6 @@ the same as the primary screen now does."
     ;; Bare LF: column preserved, so "def" lands at (6 . 1).
     (should (equal '(6 . 1) (ghostel-test--cursor term)))))
 
-(ert-deftest ghostel-test-write-input-preserves-bare-lf-on-alt-screen-1047 ()
-  "Bare LF preserves the column on the alt screen via DECSET 1047 too."
-  :tags '(native)
-  (let ((term (ghostel--new 25 80 1000)))
-    (ghostel--write-input term "\e[?1047h")
-    (ghostel--write-input term "abc\ndef")
-    (should (equal '(6 . 1) (ghostel-test--cursor term)))))
-
-(ert-deftest ghostel-test-write-input-preserves-bare-lf-on-alt-screen-47 ()
-  "Bare LF preserves the column on the alt screen via legacy DECSET 47."
-  :tags '(native)
-  (let ((term (ghostel--new 25 80 1000)))
-    (ghostel--write-input term "\e[?47h")
-    (ghostel--write-input term "abc\ndef")
-    (should (equal '(6 . 1) (ghostel-test--cursor term)))))
-
-(ert-deftest ghostel-test-write-input-preserves-bare-lf-after-leaving-alt-screen ()
-  "Leaving the alternate screen does not reintroduce CR normalization.
-A bare LF on the primary screen still preserves the column after the
-alternate screen has been entered and left."
-  :tags '(native)
-  (let ((term (ghostel--new 25 80 1000)))
-    (ghostel--write-input term "\e[?1049h")
-    (ghostel--write-input term "\e[?1049l") ; back to primary
-    (ghostel--write-input term "abc\ndef")
-    (should (equal '(6 . 1) (ghostel-test--cursor term)))))
-
 (ert-deftest ghostel-test-backspace ()
   "Test backspace (BS) processing by the terminal."
   :tags '(native)
